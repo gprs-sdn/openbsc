@@ -40,6 +40,12 @@
 	for (line = strtok_r(NULL, "\r\n", &save); line;\
 	     line = strtok_r(NULL, "\r\n", &save))
 
+/* Assume audio frame length of 20ms */
+#define DEFAULT_RTP_AUDIO_FRAME_DUR_NUM 20
+#define DEFAULT_RTP_AUDIO_FRAME_DUR_DEN 1000
+#define DEFAULT_RTP_AUDIO_FRAMES_PER_PACKET 1
+#define DEFAULT_RTP_AUDIO_DEFAULT_RATE  8000
+
 static void mgcp_rtp_end_reset(struct mgcp_rtp_end *end);
 
 struct mgcp_parse_data {
@@ -967,11 +973,17 @@ static void mgcp_rtp_end_reset(struct mgcp_rtp_end *end)
 	end->fmtp_extra = NULL;
 }
 
-static void mgcp_rtp_end_init(struct mgcp_rtp_end *end)
+void mgcp_rtp_end_init(struct mgcp_rtp_end *end)
 {
 	mgcp_rtp_end_reset(end);
 	end->rtp.fd = -1;
 	end->rtcp.fd = -1;
+
+	/* Set default values */
+	end->frame_duration_num = DEFAULT_RTP_AUDIO_FRAME_DUR_NUM;
+	end->frame_duration_den = DEFAULT_RTP_AUDIO_FRAME_DUR_DEN;
+	end->frames_per_packet  = DEFAULT_RTP_AUDIO_FRAMES_PER_PACKET;
+	end->rate = DEFAULT_RTP_AUDIO_DEFAULT_RATE;
 }
 
 int mgcp_endpoints_allocate(struct mgcp_trunk_config *tcfg)

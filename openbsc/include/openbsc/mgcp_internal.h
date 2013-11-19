@@ -77,6 +77,10 @@ struct mgcp_rtp_end {
 
 	/* per endpoint data */
 	int payload_type;
+	uint32_t rate;
+	uint32_t frame_duration_num;
+	uint32_t frame_duration_den;
+	int  frames_per_packet;
 	char *fmtp_extra;
 
 	/*
@@ -176,5 +180,6 @@ void mgcp_state_calc_loss(struct mgcp_rtp_state *s, struct mgcp_rtp_end *,
 			uint32_t *expected, int *loss);
 uint32_t mgcp_state_calc_jitter(struct mgcp_rtp_state *);
 
+void mgcp_rtp_end_init(struct mgcp_rtp_end *end);
 
 #endif

@@ -428,6 +428,8 @@ static void test_packet_error_detection(void)
 	memset(&state, 0, sizeof(state));
 	memset(&rtp, 0, sizeof(rtp));
 
+	mgcp_rtp_end_init(&rtp);
+
 	trunk.number_endpoints = 1;
 	trunk.endpoints = &endp;
 
