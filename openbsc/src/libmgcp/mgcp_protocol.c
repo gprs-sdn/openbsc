@@ -642,6 +642,7 @@ static struct msgb *handle_modify_con(struct mgcp_parse_data *p)
 	int error_code = 500;
 	int silent = 0;
 	char *line;
+	int audio_payload = -1;
 
 	if (p->found != 0)
 		return create_err_response(NULL, 510, "MDCX", p->trans);
@@ -680,7 +681,20 @@ static struct msgb *handle_modify_con(struct mgcp_parse_data *p)
 		case '\0':
 			/* SDP file begins */
 			break;
-		case 'a':
+		case 'a': {
+			int payload;
+			int rate;
+
+			if (sscanf(line, "a=rtpmap:%d %*[^/]/%d",
+				   &payload, &rate) == 2) {
+				if (payload != audio_payload)
+					break;
+
+				endp->net_end.rate = rate;
+			}
+			break;
+		}
+
 		case 'o':
 		case 's':
 		case 't':
@@ -689,12 +703,12 @@ static struct msgb *handle_modify_con(struct mgcp_parse_data *p)
 			break;
 		case 'm': {
 			int port;
-			int payload;
 
-			if (sscanf(line, "m=audio %d RTP/AVP %d", &port, &payload) == 2) {
+			if (sscanf(line, "m=audio %d RTP/AVP %d",
+				   &port, &audio_payload) == 2) {
 				endp->net_end.rtp_port = htons(port);
 				endp->net_end.rtcp_port = htons(port + 1);
-				endp->net_end.payload_type = payload;
+				endp->net_end.payload_type = audio_payload;
 			}
 			break;
 		}
