@@ -31,6 +31,11 @@
 
 #include <sys/socket.h>
 
+#include "g711common.h"
+#include <gsm.h>
+#include <bcg729/decoder.h>
+#include <bcg729/encoder.h>
+
 #include <openbsc/debug.h>
 #include <openbsc/gsm_data.h>
 #include <openbsc/mgcp.h>
