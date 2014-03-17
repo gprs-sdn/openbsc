@@ -232,11 +232,13 @@ static struct msgb *create_response_with_sdp(struct mgcp_endpoint *endp,
 					     const char *msg, const char *trans_id)
 {
 	const char *addr = endp->cfg->local_ip;
-	const char *fmtp_extra = endp->bts_end.fmtp_extra;
-	const char *audio_name = endp->bts_end.audio_name;
-	int payload_type = endp->bts_end.payload_type;
+	const char *fmtp_extra;
+	const char *audio_name;
+	int payload_type;
 	char sdp_record[4096];
 	int len;
+
+	mgcp_net_downlink_format(endp, &payload_type, &audio_name, &fmtp_extra);
 
 	if (!addr)
 		addr = endp->cfg->source_addr;
@@ -1361,9 +1363,11 @@ static void send_msg(struct mgcp_endpoint *endp, int endpoint, int port,
 {
 	char buf[2096];
 	int len;
-	const char *fmtp_extra = endp->bts_end.fmtp_extra;
-	const char *audio_name = endp->bts_end.audio_name;
-	int payload_type = endp->bts_end.payload_type;
+	const char *fmtp_extra;
+	const char *audio_name;
+	int payload_type;
+
+	mgcp_net_downlink_format(endp, &payload_type, &audio_name, &fmtp_extra);
 
 	/* hardcoded to AMR right now, we do not know the real type at this point */
 	len = snprintf(buf, sizeof(buf),
