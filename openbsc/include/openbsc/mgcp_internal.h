@@ -211,4 +211,10 @@ int mgcp_setup_processing(struct mgcp_endpoint *endp,
 			  struct mgcp_rtp_end *src_end)
 	__attribute__((weak));
 
+void mgcp_net_downlink_format(struct mgcp_endpoint *endp,
+			      int *payload_type,
+			      const char**subtype_name,
+			      const char**fmtp_extra)
+	__attribute__((weak));
+
 #endif
