@@ -163,6 +163,8 @@ struct mgcp_config {
 	struct mgcp_port_range transcoder_ports;
 	int endp_dscp;
 
+	int bts_force_ptime;
+
 	mgcp_change change_cb;
 	mgcp_policy policy_cb;
 	mgcp_reset reset_cb;

@@ -70,12 +70,14 @@ struct mgcp_process_rtp_state {
 	} dst;
 	size_t dst_frame_size;
 	size_t dst_samples_per_frame;
+	int dst_packet_duration;
 
-	int second_packet;
-	int ptime_different;
+	int is_running;
 	uint16_t next_seq;
+	uint32_t next_time;
 	int16_t samples[10*160];
 	size_t sample_cnt;
+	size_t sample_offs;
 };
 
 int mgcp_get_trans_frame_size(void *state_, int nsamples, int dst)
@@ -297,6 +299,8 @@ int mgcp_setup_processing(struct mgcp_endpoint *endp,
 		break;
 	}
 
+	state->dst_packet_duration = mgcp_rtp_packet_duration(endp, dst_end);
+
 	LOGP(DMGCP, LOGL_INFO,
 	     "Initialized RTP processing on: 0x%x "
 	     "conv: %d (%d, %d, %s) -> %d (%d, %d, %s)\n",
@@ -325,32 +329,10 @@ void mgcp_net_downlink_format(struct mgcp_endpoint *endp,
 	*audio_name = endp->net_end.audio_name;
 }
 
-
-int mgcp_process_rtp_payload(struct mgcp_endpoint *endp,
-				struct mgcp_rtp_end *dst_end,
-			     char *data, int *len, int buf_size)
+static int decode_audio(struct mgcp_process_rtp_state *state,
+			uint8_t **src, size_t *nbytes)
 {
-	struct mgcp_process_rtp_state *state = dst_end->rtp_process_data;
-	size_t rtp_hdr_size = 12;
-	char *payload_data = data + rtp_hdr_size;
-	int payload_len = *len - rtp_hdr_size;
-	size_t sample_idx;
-	uint8_t *src = (uint8_t *)payload_data;
-	uint8_t *dst = (uint8_t *)payload_data;
-	size_t nbytes = payload_len;
-	size_t frame_remainder;
-	uint32_t ts_no;
-
-	if (!state)
-		return 0;
-
-	if (state->src_fmt == state->dst_fmt)
-		return 0;
-
-	/* TODO: check payload type (-> G.711 comfort noise) */
-
-	/* Decode src into samples */
-	while (nbytes >= state->src_frame_size) {
+	while (*nbytes >= state->src_frame_size) {
 		if (state->sample_cnt + state->src_samples_per_frame > ARRAY_SIZE(state->samples)) {
 			LOGP(DMGCP, LOGL_ERROR,
 			     "Sample buffer too small: %d > %d.\n",
@@ -361,7 +343,7 @@ int mgcp_process_rtp_payload(struct mgcp_endpoint *endp,
 		switch (state->src_fmt) {
 		case AF_GSM:
 			if (gsm_decode(state->src.gsm_handle,
-				       (gsm_byte *)src, state->samples + state->sample_cnt) < 0) {
+				       (gsm_byte *)*src, state->samples + state->sample_cnt) < 0) {
 				LOGP(DMGCP, LOGL_ERROR,
 				     "Failed to decode GSM.\n");
 				return -EINVAL;
@@ -369,28 +351,166 @@ int mgcp_process_rtp_payload(struct mgcp_endpoint *endp,
 			break;
 #ifdef HAVE_BCG729
 		case AF_G729:
-			bcg729Decoder(state->src.g729_dec, src, 0, state->samples + state->sample_cnt);
+			bcg729Decoder(state->src.g729_dec, *src, 0, state->samples + state->sample_cnt);
 			break;
 #endif
 		case AF_PCMA:
-			alaw_decode(src, state->samples + state->sample_cnt,
+			alaw_decode(*src, state->samples + state->sample_cnt,
 				    state->src_samples_per_frame);
 			break;
 		case AF_S16:
-			memmove(state->samples + state->sample_cnt, src,
+			memmove(state->samples + state->sample_cnt, *src,
 				state->src_frame_size);
 			break;
 		case AF_L16:
-			l16_decode(src, state->samples + state->sample_cnt,
+			l16_decode(*src, state->samples + state->sample_cnt,
 				   state->src_samples_per_frame);
 			break;
 		default:
 			break;
 		}
-		src        += state->src_frame_size;
-		nbytes     -= state->src_frame_size;
+		*src        += state->src_frame_size;
+		*nbytes     -= state->src_frame_size;
 		state->sample_cnt += state->src_samples_per_frame;
 	}
+	return 0;
+}
+
+static int encode_audio(struct mgcp_process_rtp_state *state,
+			uint8_t *dst, size_t buf_size, size_t max_samples)
+{
+	int nbytes = 0;
+	size_t nsamples = 0;
+	/* Encode samples into dst */
+	while (nsamples + state->dst_samples_per_frame <= max_samples) {
+		if (nbytes + state->dst_frame_size > buf_size) {
+			if (nbytes > 0)
+				break;
+
+			/* Not even one frame fits into the buffer */
+			LOGP(DMGCP, LOGL_INFO,
+			     "Encoding (RTP) buffer too small: %d > %d.\n",
+			     nbytes + state->dst_frame_size, buf_size);
+			return -ENOSPC;
+		}
+		switch (state->dst_fmt) {
+		case AF_GSM:
+			gsm_encode(state->dst.gsm_handle,
+				   state->samples + state->sample_offs, dst);
+			break;
+#ifdef HAVE_BCG729
+		case AF_G729:
+			bcg729Encoder(state->dst.g729_enc,
+				      state->samples + state->sample_offs, dst);
+			break;
+#endif
+		case AF_PCMA:
+			alaw_encode(state->samples + state->sample_offs, dst,
+				    state->src_samples_per_frame);
+			break;
+		case AF_S16:
+			memmove(dst, state->samples + state->sample_offs,
+				state->dst_frame_size);
+			break;
+		case AF_L16:
+			l16_encode(state->samples + state->sample_offs, dst,
+				   state->src_samples_per_frame);
+			break;
+		default:
+			break;
+		}
+		dst        += state->dst_frame_size;
+		nbytes     += state->dst_frame_size;
+		state->sample_offs += state->dst_samples_per_frame;
+		nsamples   += state->dst_samples_per_frame;
+	}
+	state->sample_cnt -= nsamples;
+	return nbytes;
+}
+
+int mgcp_process_rtp_payload(struct mgcp_endpoint *endp,
+				struct mgcp_rtp_end *dst_end,
+			     char *data, int *len, int buf_size)
+{
+	struct mgcp_process_rtp_state *state = dst_end->rtp_process_data;
+	size_t rtp_hdr_size = 12;
+	char *payload_data = data + rtp_hdr_size;
+	int payload_len = *len - rtp_hdr_size;
+	// size_t sample_idx;
+	uint8_t *src = (uint8_t *)payload_data;
+	uint8_t *dst = (uint8_t *)payload_data;
+	size_t nbytes = payload_len;
+	// size_t frame_remainder;
+	size_t nsamples;
+	size_t max_samples;
+	uint32_t ts_no;
+	int rc;
+
+	if (!state)
+		return 0;
+
+	if (state->src_fmt == state->dst_fmt)
+		return 0;
+
+	/* If the remaining samples do not fit into a fixed ptime,
+	 * a) discard them, if the next packet is much later
+	 * b) add silence and * send it, if the current packet is not
+	 *    yet too late
+	 * c) append the sample data, if the timestamp matches exactly
+	 */
+
+	/* TODO: check payload type (-> G.711 comfort noise) */
+
+	if (payload_len > 0) {
+		ts_no = ntohl(*(uint32_t*)(data+4));
+		if (!state->is_running)
+			state->next_seq = ntohs(*(uint32_t*)(data+4));
+
+		state->is_running = 1;
+
+		if (state->sample_cnt > 0) {
+			int32_t delta = ts_no - state->next_time;
+			/* TODO: check sequence? reordering? packet loss? */
+
+			if (delta > state->sample_cnt)
+				/* There is a time gap between the last packet
+				 * and the current one. Just discard the
+				 * partial data that is left in the buffer.
+				 * TODO: This can be improved by adding silence
+				 * instead if the delta is small enough.
+				 */
+				state->sample_cnt = 0;
+			else if (delta < 0) {
+				LOGP(DMGCP, LOGL_NOTICE,
+				     "RTP time jumps backwards, delta = %d, "
+				     "discarding buffered samples\n",
+				     delta);
+				state->sample_cnt = 0;
+				state->sample_offs = 0;
+				return -EAGAIN;
+			}
+
+			/* Make sure the samples start without offset */
+			fprintf(stderr, "Moving %d samples to buffer start (offset %d)\n", state->sample_cnt, state->sample_offs);
+			if (state->sample_offs && state->sample_cnt)
+				memmove(&state->samples[0],
+					&state->samples[state->sample_offs],
+					state->sample_cnt * sizeof(state->samples[0]));
+		}
+
+		state->sample_offs = 0;
+
+		/* Append decoded audio to samples */
+		decode_audio(state, &src, &nbytes);
+
+		if (nbytes > 0)
+			LOGP(DMGCP, LOGL_NOTICE,
+			     "Skipped audio frame in RTP packet: %d octets\n",
+			     nbytes);
+	} else
+		ts_no = state->next_time;
+
+#if 0
 
 	/* Add silence if necessary */
 	/* sigh...this equipment doesn't honor the ptime... */
@@ -435,14 +555,41 @@ int mgcp_process_rtp_payload(struct mgcp_endpoint *endp,
 			state->ptime_different = 1;
 		}
 	}
+#endif
 
+	if (state->sample_cnt < state->dst_packet_duration)
+		return -EAGAIN;
+
+	max_samples =
+		state->dst_packet_duration ?
+		state->dst_packet_duration : state->sample_cnt;
+
+	nsamples = state->sample_cnt;
+
+	rc = encode_audio(state, dst, buf_size, max_samples);
+	if (rc <= 0)
+		return rc;
+
+	nsamples -= state->sample_cnt;
+	fprintf(stderr, "Wrote %d samples to buffer (offset %d)\n", nsamples, state->sample_offs);
+
+	*len = rtp_hdr_size + rc;
+	*(uint16_t*)(data+2) = htonl(state->next_seq);
+	*(uint32_t*)(data+4) = htonl(ts_no);
+
+	state->next_seq += 1;
+	state->next_time = ts_no + nsamples;
+
+	return nsamples ? rtp_hdr_size : 0;
+
+#if 0
 	state->second_packet = 1;
 	memcpy(&ts_no, &data[4], 4);
 
 	/* Encode samples into dst */
 	sample_idx = 0;
 	nbytes = 0;
-	while (sample_idx + state->dst_samples_per_frame <= state->sample_cnt) {
+	while (sample_idx + state->dst_samples_per_frame <= num_packet_samples) {
 		if (nbytes + state->dst_frame_size > buf_size) {
 			LOGP(DMGCP, LOGL_ERROR,
 			     "Encoding (RTP) buffer too small: %d > %d.\n",
@@ -487,7 +634,7 @@ int mgcp_process_rtp_payload(struct mgcp_endpoint *endp,
 			state->next_seq = htons(ntohs(state->next_seq) + 1);
 			ts_no = htonl(ntohl(ts_no) + state->dst_samples_per_frame);
 		}
-		mgcp_do_send(endp, dst_end, data, *len);
+		// mgcp_do_send(endp, dst_end, data, *len);
 	}
 
 	state->sample_cnt = 0;
@@ -500,4 +647,5 @@ int mgcp_process_rtp_payload(struct mgcp_endpoint *endp,
 	       */
 
 	return -1;
+#endif
 }

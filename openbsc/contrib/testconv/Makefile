@@ -5,7 +5,7 @@ CC = gcc
 CFLAGS = -O0 -ggdb
 LDFLAGS =
 CPPFLAGS = -I../../include $(shell pkg-config --cflags libosmocore) $(shell pkg-config --cflags libbcg729)
-LIBS =  ../../src/libcommon/libcommon.a $(shell pkg-config --libs libosmocore) $(shell pkg-config --libs libbcg729) -lgsm
+LIBS =  ../../src/libmgcp/libmgcp.a ../../src/libcommon/libcommon.a $(shell pkg-config --libs libosmocore) $(shell pkg-config --libs libbcg729) -lgsm -lrt
 
 testconv: $(OBJS)
 	$(CC)  -o $@ $^ $(LDFLAGS) $(LIBS)

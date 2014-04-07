@@ -217,7 +217,4 @@ void mgcp_net_downlink_format(struct mgcp_endpoint *endp,
 			      const char**fmtp_extra)
 	__attribute__((weak));
 
-int mgcp_do_send(struct mgcp_endpoint *endp, struct mgcp_rtp_end *rtp_end,
-		char *buf, int len);
-
 #endif
