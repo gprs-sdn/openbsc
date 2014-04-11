@@ -29,6 +29,7 @@
 #include <openbsc/debug.h>
 #include <openbsc/sgsn.h>
 #include <osmocom/gprs/gprs_ns.h>
+#include <openbsc/gprs_vgsn.h>
 #include <openbsc/gprs_sgsn.h>
 #include <openbsc/vty.h>
 #include <openbsc/gsm_04_08_gprs.h>
@@ -116,6 +117,7 @@ static struct cmd_node sgsn_node = {
 
 static int config_write_sgsn(struct vty *vty)
 {
+	struct vgsn_rest_ctx *rctx;
 	struct sgsn_ggsn_ctx *gctx;
 	struct imsi_acl_entry *acl;
 
@@ -123,6 +125,11 @@ static int config_write_sgsn(struct vty *vty)
 
 	vty_out(vty, " gtp local-ip %s%s",
 		inet_ntoa(g_cfg->gtp_listenaddr.sin_addr), VTY_NEWLINE);
+
+	llist_for_each_entry(rctx, &vgsn_rest_ctxts, list) {
+		vty_out(vty, " rest %u remote-url %s%s", rctx->id,
+			rctx->remote_url, VTY_NEWLINE);
+	}
 
 	llist_for_each_entry(gctx, &sgsn_ggsn_ctxts, list) {
 		vty_out(vty, " ggsn %u remote-ip %s%s", gctx->id,
@@ -140,6 +147,7 @@ static int config_write_sgsn(struct vty *vty)
 }
 
 #define SGSN_STR	"Configure the SGSN\n"
+#define REST_STR	"Configure the REST interface\n"
 #define GGSN_STR	"Configure the GGSN information\n"
 
 DEFUN(cfg_sgsn, cfg_sgsn_cmd,
@@ -157,6 +165,20 @@ DEFUN(cfg_sgsn_bind_addr, cfg_sgsn_bind_addr_cmd,
 	"IPv4 Address\n")
 {
 	inet_aton(argv[0], &g_cfg->gtp_listenaddr.sin_addr);
+
+	return CMD_SUCCESS;
+}
+
+DEFUN(cfg_rest_remote_url, cfg_rest_remote_url_cmd,
+	"rest <0-255> remote-url WORD",
+	REST_STR "REST Number\n" "URL for REST interface\n" "URL\n")
+{
+	uint32_t id = atoi(argv[0]);
+	struct vgsn_rest_ctx *rc = vgsn_rest_ctx_find_alloc(id);
+
+	strncpy(rc->remote_url, argv[1], sizeof(rc->remote_url) - 1);
+
+	vgsn_rest_ctx_init(rc);
 
 	return CMD_SUCCESS;
 }
@@ -420,6 +442,7 @@ int sgsn_vty_init(void)
 	install_node(&sgsn_node, config_write_sgsn);
 	vty_install_default(SGSN_NODE);
 	install_element(SGSN_NODE, &cfg_sgsn_bind_addr_cmd);
+	install_element(SGSN_NODE, &cfg_rest_remote_url_cmd);
 	install_element(SGSN_NODE, &cfg_ggsn_remote_ip_cmd);
 	//install_element(SGSN_NODE, &cfg_ggsn_remote_port_cmd);
 	install_element(SGSN_NODE, &cfg_ggsn_gtp_version_cmd);

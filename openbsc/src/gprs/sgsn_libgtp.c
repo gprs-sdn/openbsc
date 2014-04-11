@@ -43,6 +43,7 @@
 #include <openbsc/debug.h>
 #include <openbsc/sgsn.h>
 #include <openbsc/gprs_llc.h>
+#include <openbsc/gprs_vgsn.h>
 #include <openbsc/gprs_sgsn.h>
 #include <openbsc/gprs_gmm.h>
 
@@ -113,9 +114,11 @@ static uint64_t imsi_str2gtp(char *str)
 
 /* generate a PDP context based on the IE's from the 04.08 message,
  * and send the GTP create pdp context request to the GGSN */
-struct sgsn_pdp_ctx *sgsn_create_pdp_ctx(struct sgsn_ggsn_ctx *ggsn,
+struct sgsn_pdp_ctx *sgsn_create_pdp_ctx(struct vgsn_rest_ctx *rest,
+					 struct sgsn_ggsn_ctx *ggsn,
 					 struct sgsn_mm_ctx *mmctx,
 					 uint16_t nsapi,
+					 uint16_t sapi,
 					 struct tlv_parsed *tp)
 {
 	struct sgsn_pdp_ctx *pctx;
@@ -140,12 +143,16 @@ struct sgsn_pdp_ctx *sgsn_create_pdp_ctx(struct sgsn_ggsn_ctx *ggsn,
 	pdp->priv = pctx;
 	pctx->lib = pdp;
 	pctx->ggsn = ggsn;
+	pctx->rest = rest;
+	pctx->sapi = sapi;
 
 	//pdp->peer =	/* sockaddr_in of GGSN (receive) */
 	//pdp->ipif =	/* not used by library */
-	pdp->version = ggsn->gtp_version;
-	pdp->hisaddr0 =	ggsn->remote_addr;
-	pdp->hisaddr1 = ggsn->remote_addr;
+	if (ggsn) {
+		pdp->version = ggsn->gtp_version;
+		pdp->hisaddr0 =	ggsn->remote_addr;
+		pdp->hisaddr1 = ggsn->remote_addr;
+	}
 	//pdp->cch_pdp = 512;	/* Charging Flat Rate */
 
 	/* MS provided APN, subscription not verified */
@@ -200,8 +207,15 @@ struct sgsn_pdp_ctx *sgsn_create_pdp_ctx(struct sgsn_ggsn_ctx *ggsn,
 	/* change pdp state to 'requested' */
 	pctx->state = PDP_STATE_CR_REQ;
 
-	rc = gtp_create_context_req(ggsn->gsn, pdp, pctx);
-	/* FIXME */
+	if (rest) {
+		rc = vgsn_rest_create_context_req(rest, pdp, pctx);
+		/* FIXME */
+	} else if (ggsn) {
+		rc = gtp_create_context_req(ggsn->gsn, pdp, pctx);
+		/* FIXME */
+	} else {
+		LOGP(DGPRS, LOGL_ERROR, "No GGSN or REST defined!\n");
+	}
 
 	return pctx;
 }
@@ -210,9 +224,18 @@ struct sgsn_pdp_ctx *sgsn_create_pdp_ctx(struct sgsn_ggsn_ctx *ggsn,
 int sgsn_delete_pdp_ctx(struct sgsn_pdp_ctx *pctx)
 {
 	LOGP(DGPRS, LOGL_ERROR, "Delete PDP Context\n");
-
+	
 	/* FIXME: decide if we need teardown or not ! */
-	return gtp_delete_context_req(pctx->ggsn->gsn, pctx->lib, pctx, 1);
+
+	if (pctx->rest) {
+		return vgsn_rest_delete_context_req(pctx->rest, pctx);
+	} else if (pctx->ggsn) {
+		return gtp_delete_context_req(pctx->ggsn->gsn, pctx->lib, pctx, 1);
+	} else {
+		LOGP(DGPRS, LOGL_ERROR, "Delete Invalid PDP Context\n");
+	}
+
+	return 0;
 }
 
 struct cause_map {
@@ -266,6 +289,7 @@ static int create_pdp_conf(struct pdp_t *pdp, void *cbp, int cause)
 	/* Check for cause value if it was really successful */
 	if (cause < 0) {
 		LOGP(DGPRS, LOGL_NOTICE, "Create PDP ctx req timed out\n");
+		//XXX: SDN: what about REST?
 		if (pdp && pdp->version == 1) {
 			pdp->version = 0;
 			gtp_create_context_req(sgsn->gsn, pdp, cbp);
@@ -515,6 +539,12 @@ int sgsn_rx_sndcp_ud_ind(struct gprs_ra_id *ra_id, int32_t tlli, uint8_t nsapi,
 	rate_ctr_add(&pdp->ctrg->ctr[PDP_CTR_BYTES_UDATA_IN], npdu_len);
 	rate_ctr_inc(&mmctx->ctrg->ctr[GMM_CTR_PKTS_UDATA_IN]);
 	rate_ctr_add(&mmctx->ctrg->ctr[GMM_CTR_BYTES_UDATA_IN], npdu_len);
+
+	if (!pdp->ggsn) {
+		LOGP(DGPRS, LOGL_ERROR, "Received data for PDP context withou GGSN.\n" 
+			 "Something is wrong with our SDN forwarders...\n");
+		return -EIO;
+	}
 
 	return gtp_data_req(pdp->ggsn->gsn, pdp->lib, npdu, npdu_len);
 }

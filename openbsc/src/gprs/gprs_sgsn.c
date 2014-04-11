@@ -31,6 +31,7 @@
 
 #include <openbsc/gsm_subscriber.h>
 #include <openbsc/debug.h>
+#include <openbsc/gprs_vgsn.h>
 #include <openbsc/gprs_sgsn.h>
 #include <openbsc/sgsn.h>
 #include <openbsc/gsm_04_08_gprs.h>

@@ -142,10 +142,14 @@ enum pdp_type {
 	PDP_TYPE_IANA_IPv6,
 };
 
+struct vgsn_rest_ctx;
+
 struct sgsn_pdp_ctx {
 	struct llist_head	list;	/* list_head for mmctx->pdp_list */
 	struct llist_head	g_list;	/* list_head for global list */
 	struct sgsn_mm_ctx	*mm;	/* back pointer to MM CTX */
+	/* XXX: ggsn should be 0, when rest is in use */
+	struct vgsn_rest_ctx	*rest;	/* which REST interface serves this PDP */
 	struct sgsn_ggsn_ctx	*ggsn;	/* which GGSN serves this PDP */
 	struct rate_ctr_group	*ctrg;
 
@@ -204,6 +208,7 @@ struct sgsn_ggsn_ctx *sgsn_ggsn_ctx_find_alloc(uint32_t id);
 
 struct apn_ctx {
 	struct llist_head list;
+	struct vgsn_rest_ctx *rest;
 	struct sgsn_ggsn_ctx *ggsn;
 	char *name;
 	char *description;

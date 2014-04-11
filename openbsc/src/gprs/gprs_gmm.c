@@ -48,6 +48,7 @@
 #include <openbsc/paging.h>
 #include <openbsc/transaction.h>
 #include <openbsc/gprs_llc.h>
+#include <openbsc/gprs_vgsn.h>
 #include <openbsc/gprs_sgsn.h>
 #include <openbsc/gprs_gmm.h>
 #include <openbsc/sgsn.h>
@@ -1313,6 +1314,7 @@ static int gsm48_rx_gsm_act_pdp_req(struct sgsn_mm_ctx *mmctx,
 	uint8_t *req_qos, *req_pdpa;
 	struct tlv_parsed tp;
 	uint8_t transaction_id = (gh->proto_discr >> 4);
+	struct vgsn_rest_ctx *rest;
 	struct sgsn_ggsn_ctx *ggsn;
 	struct sgsn_pdp_ctx *pdp;
 
@@ -1405,18 +1407,25 @@ static int gsm48_rx_gsm_act_pdp_req(struct sgsn_mm_ctx *mmctx,
 	 * for re-transmissions */
 	rate_ctr_inc(&mmctx->ctrg->ctr[GMM_CTR_PDP_CTX_ACT]);
 
-	ggsn = sgsn_ggsn_ctx_by_id(0);
-	if (!ggsn) {
-		LOGP(DGPRS, LOGL_ERROR, "No GGSN context 0 found!\n");
-		return -EIO;
+	rest = vgsn_rest_ctx_by_id(0); 
+	if (rest) {
+		ggsn = 0;
+	} else {
+		LOGP(DGPRS, LOGL_NOTICE, "No REST context 0 found! Trying GGSN context 0...\n");
+		rest = 0;
+		ggsn = sgsn_ggsn_ctx_by_id(0);
+		if (!ggsn) {
+			LOGP(DGPRS, LOGL_ERROR, "No REST or GGSN context 0 found!\n");
+			return -EIO;
+		}
+		ggsn->gsn = sgsn->gsn;
 	}
-	ggsn->gsn = sgsn->gsn;
-	pdp = sgsn_create_pdp_ctx(ggsn, mmctx, act_req->req_nsapi, &tp);
+
+	pdp = sgsn_create_pdp_ctx(rest, ggsn, mmctx, act_req->req_nsapi, act_req->req_llc_sapi, &tp);
 	if (!pdp)
 		return -1;
 
-	/* Store SAPI and Transaction Identifier */
-	pdp->sapi = act_req->req_llc_sapi;
+	/* Store Transaction Identifier */
 	pdp->ti = transaction_id;
 
 	return 0;

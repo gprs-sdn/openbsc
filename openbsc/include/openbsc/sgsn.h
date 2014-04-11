@@ -5,6 +5,7 @@
 #include <osmocom/core/msgb.h>
 
 #include <osmocom/gprs/gprs_ns.h>
+#include <openbsc/gprs_vgsn.h>
 #include <openbsc/gprs_sgsn.h>
 
 struct sgsn_config {
@@ -46,9 +47,11 @@ int sgsn_parse_config(const char *config_file, struct sgsn_config *cfg);
 int sgsn_rcvmsg(struct msgb *msg, struct gprs_nsvc *nsvc, uint16_t ns_bvci);
 
 
-struct sgsn_pdp_ctx *sgsn_create_pdp_ctx(struct sgsn_ggsn_ctx *ggsn,
+struct sgsn_pdp_ctx *sgsn_create_pdp_ctx(struct vgsn_rest_ctx *rest,
+					 struct sgsn_ggsn_ctx *ggsn,
 					 struct sgsn_mm_ctx *mmctx,
 					 uint16_t nsapi,
+					 uint16_t sapi,
 					 struct tlv_parsed *tp);
 int sgsn_delete_pdp_ctx(struct sgsn_pdp_ctx *pctx);
 
