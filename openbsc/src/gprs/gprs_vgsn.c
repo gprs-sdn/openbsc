@@ -1,5 +1,9 @@
 /* GPRS vGSN functionality */
 
+/**
+ * Jan Skalny <jan@skalny.sk>
+ */
+
 #include <stdint.h>
 #include <curl/curl.h>
 
@@ -12,6 +16,9 @@
 #include <openbsc/gprs_vgsn.h>
 #include <openbsc/gprs_sgsn.h>
 #include <openbsc/sgsn.h>
+#include <openbsc/curl.h>
+
+#include "nxjson.h"
 
 #include <pdp.h>
 
@@ -65,14 +72,14 @@ void vgsn_rest_ctx_init(struct vgsn_rest_ctx *rc) {
 
 	// cleanup
 	if (rc->curl) 
-		curl_easy_cleanup(rc->curl);
+		curl_conn_destroy(rc->curl);
 
-	if (!(rc->curl = curl_easy_init())) {
+	// create new curl connection
+	rc->curl = curl_conn_create();
+	if (!rc->curl) {
 		LOGP(DGPRS, LOGL_ERROR, "Initializing invalid REST context!\n");
 		return;
 	}
-	
-	curl_easy_setopt(rc->curl, CURLOPT_FOLLOWLOCATION, 1);
 }
 
 int vgsn_rest_delete_context_req(
@@ -83,6 +90,48 @@ int vgsn_rest_delete_context_req(
 	return 0;	
 }
 
+
+/**
+ * Callback indicating finished vgsn_rest_create_context_req execution
+ */
+void vgsn_rest_create_context_cb(struct curl_conn *conn, struct curl_buf *buf, void *ctx)
+{
+	const nx_json *json;
+	const nx_json *json_address, *json_dns1, *json_dns2;
+
+	if (!conn || !buf) {
+		LOGP(DGPRS, LOGL_ERROR, "vgsn_rest_create_context_cb: invalid buffer\n");
+		return;
+	}
+
+	// parse buffer content
+	// response should contain valid JSON with one object containint at least
+	// address and dns1 string variables
+	json = nx_json_parse(buf->data, 0);
+	if (!json) {
+		LOGP(DGPRS, LOGL_ERROR, "REST call failed: invalid response\n");
+		return;
+	}
+
+	json_address = nx_json_get(json, "address");
+	json_dns1 = nx_json_get(json, "dns1");
+	json_dns2 = nx_json_get(json, "dns2");
+	
+	if (json_address->type != NX_JSON_STRING) {
+		LOGP(DGPRS, LOGL_ERROR, "REST call failed: no IP address received\n");
+		return;
+	}
+	
+	LOGP(DGPRS, LOGL_ERROR, "REST response: address=%s dns1=%s dns2=%s\n", 
+			json_address->text_value, json_dns1->text_value, json_dns2->text_value);
+
+	//TODO: send response upon successful retrieval to 
+	// static int create_pdp_conf(struct pdp_t *pdp, void *cbp, int cause)
+}
+
+/**
+ * PDP context activation request
+ */
 int vgsn_rest_create_context_req(
 		struct vgsn_rest_ctx *rest, 
 		struct pdp_t *pdp, 
@@ -90,17 +139,17 @@ int vgsn_rest_create_context_req(
 {
 	char req[REST_REMOTE_URL_LENGTH+400];
 	struct sgsn_mm_ctx *mm;
-	CURLcode res;
 
 	LOGP(DGPRS, LOGL_NOTICE, "Creating PDP context via REST interface (%s)\n", 
 			rest->remote_url);
 
 	if (!pctx || !pctx->mm) {
 		LOGP(DGPRS, LOGL_ERROR, "PDP context invalid!");
-		return 0; //XXX: return something else
+		return -1;
 	}
 	mm = pctx->mm;
 
+	// create our REST request
 	snprintf(req, sizeof(req)-1, "%s?gprs/pdp/add&bvci=%u&tlli=%x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s", 
 			rest->remote_url,
 			mm->bvci,
@@ -111,18 +160,10 @@ int vgsn_rest_create_context_req(
 			pdp->apn_use.v+1	//XXX: dirty, make some validation / apn_use.l
 			);
 
-	curl_easy_setopt(rest->curl, CURLOPT_URL, req);
-
-	//XXX: async
-	res = curl_easy_perform(rest->curl);
-	if(res != CURLE_OK) {
-		LOGP(DGPRS, LOGL_ERROR, "curl_easy_perform() failed: %s\n", 
-				curl_easy_strerror(res));
-	}
-
-	//TODO: send response upon successful retrieval to 
-	// static int create_pdp_conf(struct pdp_t *pdp, void *cbp, int cause)
-	//
+	// execute this request
+	// vgsn_rest_create_context_cb will handle the results
+	if (!curl_get(rest->curl, req, &vgsn_rest_create_context_cb, pctx)) 
+		return -1;
 
 	return 0;
 }
