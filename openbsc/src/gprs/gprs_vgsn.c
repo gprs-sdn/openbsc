@@ -105,7 +105,7 @@ int vgsn_rest_create_context_req(
 			rest->remote_url,
 			mm->bvci,
 			mm->tlli,
-			pctx->sapi, //XXX: pctx->sapi is wrong!
+			pctx->sapi, 
 			pctx->nsapi,
 			mm->ra.mcc, mm->ra.mnc, mm->ra.lac, mm->ra.rac,
 			pdp->apn_use.v+1	//XXX: dirty, make some validation / apn_use.l
