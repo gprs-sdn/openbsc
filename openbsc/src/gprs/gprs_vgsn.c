@@ -154,7 +154,7 @@ int vgsn_rest_delete_context_req(
 /**
  * Callback indicating finished vgsn_rest_create_context_req execution
  */
-void vgsn_rest_create_context_cb(struct curl_conn *conn, struct curl_buf *buf, void *ctx)
+void vgsn_rest_create_context_cb(struct curl_buf *buf, void *ctx)
 {
 	const nx_json *json;
 	const nx_json *json_address, *json_dns1, *json_dns2;
@@ -167,7 +167,7 @@ void vgsn_rest_create_context_cb(struct curl_conn *conn, struct curl_buf *buf, v
 		return;
 	}
 
-	if (!conn || !buf) {
+	if (!buf) {
 		LOGP(DGPRS, LOGL_ERROR, "vgsn_rest_create_context_cb: invalid buffer\n");
 		goto reject;
 	}
