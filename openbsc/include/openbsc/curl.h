@@ -27,7 +27,7 @@ void curl_conn_destroy(struct curl_conn *conn);
 /**
  * requests
  */
-typedef void (*curl_recv_cb)(struct curl_conn*, struct curl_buf*, void*);
+typedef void (curl_recv_cb)(struct curl_conn*, struct curl_buf*, void*);
 #if 0
 struct curl_request {
 	char *url;
@@ -41,8 +41,8 @@ struct curl_request {
 /**
  * file transfers
  */
-int curl_get(struct curl_conn *conn, char *url, curl_recv_cb cb, void *ctx);
-int curl_post(struct curl_conn *conn, char *url, char *data, uint32_t len, curl_recv_cb cb, void *ctx);
+int curl_get(struct curl_conn *conn, char *url, curl_recv_cb *cb, void *ctx);
+int curl_post(struct curl_conn *conn, char *url, char *data, uint32_t len, curl_recv_cb *cb, void *ctx);
 void curl_work();
 
 /**

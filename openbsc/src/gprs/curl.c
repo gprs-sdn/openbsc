@@ -123,7 +123,7 @@ void curl_conn_destroy(struct curl_conn *conn)
  * 
  * @returns 0 on success
  */
-int curl_get(struct curl_conn *conn, char *url, curl_recv_cb cb, void *ctx)
+int curl_get(struct curl_conn *conn, char *url, curl_recv_cb *cb, void *ctx)
 {
 	struct curl_buf *buf = NULL;
 	CURLcode res;
@@ -177,7 +177,9 @@ err:
 
 ok:
 	// either way, execute given callback function
-	cb(conn, buf, ctx);
+	if (cb) {
+		(*cb)(conn, buf, ctx);
+	}
 
 	// cleanup
 	if (buf) {

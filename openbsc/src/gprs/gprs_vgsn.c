@@ -1,6 +1,6 @@
-/* GPRS vGSN functionality */
-
 /**
+ * GPRS vGSN functionality 
+ *
  * Jan Skalny <jan@skalny.sk>
  */
 
@@ -89,14 +89,67 @@ void vgsn_rest_ctx_init(struct vgsn_rest_ctx *rc) {
 	}
 }
 
+/**
+ * Callback for PDP context deactivation request Ack
+ */
+void vgsn_rest_delete_context_cb(struct curl_conn *conn, struct curl_buf *buf, void *ctx)
+{
+	struct sgsn_pdp_ctx *pctx = ctx;
+	if (!pctx) {
+		LOGP(DGPRS, LOGL_ERROR, "vgsn_rest_delete_context_cb: missing PDP context\n");
+		return;
+	}
+
+	DEBUGP(DGPRS, "Received DELETE PDP CTX CONF, cause=%d\n", GTPCAUSE_ACC_REQ);
+
+	/* Deactivate the SNDCP layer */
+	sndcp_sm_deactivate_ind(&pctx->mm->llme->lle[pctx->sapi], pctx->nsapi);
+
+	/* Confirm deactivation of PDP context to MS */
+	gsm48_tx_gsm_deact_pdp_acc(pctx);
+
+	/* unlink the now non-existing library handle from the pdp
+	 * context */
+	pctx->lib = NULL;
+
+	sgsn_pdp_ctx_free(pctx);
+}
+
+/**
+ * PDP context deactivation request
+ */
 int vgsn_rest_delete_context_req(
 		struct vgsn_rest_ctx *rest,
 		struct sgsn_pdp_ctx *pctx)
 {
-	//XXX: inform controller
-	return 0;	
-}
+	char req[REST_REMOTE_URL_LENGTH+400];
+	struct sgsn_mm_ctx *mm;
 
+	if (!pctx || !pctx->mm) {
+		LOGP(DGPRS, LOGL_ERROR, "PDP context invalid!");
+		return -1;
+	}
+	mm = pctx->mm;
+
+	// inform controller of our intent
+	snprintf(req, sizeof(req)-1, "%s?gprs/pdp/remove&imsi=%s&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u",
+			rest->remote_url,
+			mm->imsi,
+			pctx->sapi,
+			pctx->nsapi,
+			mm->ra.mcc, mm->ra.mnc, mm->ra.lac, mm->ra.rac
+			);
+
+	if (curl_get(rest->curl, req, 0, 0))
+		return -1;
+
+	//XXX: maybe we should wait for some response from controller, before teardown?
+
+	// tear down PDP context
+	vgsn_rest_delete_context_cb(0, 0, pctx);
+
+	return 0;
+}
 
 /**
  * Callback indicating finished vgsn_rest_create_context_req execution
@@ -203,9 +256,6 @@ int vgsn_rest_create_context_req(
 	char req[REST_REMOTE_URL_LENGTH+400];
 	struct sgsn_mm_ctx *mm;
 
-	LOGP(DGPRS, LOGL_NOTICE, "Creating PDP context via REST interface (%s)\n", 
-			rest->remote_url);
-
 	if (!pctx || !pctx->mm) {
 		LOGP(DGPRS, LOGL_ERROR, "PDP context invalid!");
 		return -1;
@@ -213,8 +263,9 @@ int vgsn_rest_create_context_req(
 	mm = pctx->mm;
 
 	// create our REST request
-	snprintf(req, sizeof(req)-1, "%s?gprs/pdp/add&bvci=%u&tlli=%x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s", 
+	snprintf(req, sizeof(req)-1, "%s?gprs/pdp/add&imsi=%s&bvci=%u&tlli=%x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s", 
 			rest->remote_url,
+			mm->imsi,
 			mm->bvci,
 			mm->tlli,
 			pctx->sapi, 
@@ -225,7 +276,7 @@ int vgsn_rest_create_context_req(
 
 	// execute this request
 	// vgsn_rest_create_context_cb will handle the results
-	if (!curl_get(rest->curl, req, &vgsn_rest_create_context_cb, pctx)) 
+	if (curl_get(rest->curl, req, &vgsn_rest_create_context_cb, pctx)) 
 		return -1;
 
 	return 0;
