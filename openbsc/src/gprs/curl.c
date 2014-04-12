@@ -1,5 +1,7 @@
 /**
  * libcurl wrapper with multi-handles and queues
+ *
+ * Jan Skalny <jan@skalny.sk>
  */
 
 #include <curl/curl.h>

@@ -6,21 +6,28 @@
 
 #include <stdint.h>
 #include <curl/curl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <osmocom/core/linuxlist.h>
 #include <osmocom/core/talloc.h>
 #include <osmocom/core/select.h>
 
+#include <openbsc/gsm_04_08_gprs.h>
 #include <openbsc/gsm_subscriber.h>
 #include <openbsc/debug.h>
 #include <openbsc/gprs_vgsn.h>
 #include <openbsc/gprs_sgsn.h>
+#include <openbsc/gprs_llc.h>
+#include <openbsc/gprs_gmm.h>
 #include <openbsc/sgsn.h>
 #include <openbsc/curl.h>
 
 #include "nxjson.h"
 
 #include <pdp.h>
+#include <gtp.h>
 
 LLIST_HEAD(vgsn_rest_ctxts);
 
@@ -98,10 +105,18 @@ void vgsn_rest_create_context_cb(struct curl_conn *conn, struct curl_buf *buf, v
 {
 	const nx_json *json;
 	const nx_json *json_address, *json_dns1, *json_dns2;
+	struct sgsn_pdp_ctx *pctx = (struct sgsn_pdp_ctx*)ctx;
+	struct in_addr address, dns1, dns2;
+	struct ul255_t *pco;
+
+	if (!pctx) {
+		LOGP(DGPRS, LOGL_ERROR, "vgsn_rest_create_context_cb: missing PDP context\n");
+		return;
+	}
 
 	if (!conn || !buf) {
 		LOGP(DGPRS, LOGL_ERROR, "vgsn_rest_create_context_cb: invalid buffer\n");
-		return;
+		goto reject;
 	}
 
 	// parse buffer content
@@ -110,7 +125,7 @@ void vgsn_rest_create_context_cb(struct curl_conn *conn, struct curl_buf *buf, v
 	json = nx_json_parse(buf->data, 0);
 	if (!json) {
 		LOGP(DGPRS, LOGL_ERROR, "REST call failed: invalid response\n");
-		return;
+		goto reject;
 	}
 
 	json_address = nx_json_get(json, "address");
@@ -119,14 +134,62 @@ void vgsn_rest_create_context_cb(struct curl_conn *conn, struct curl_buf *buf, v
 	
 	if (json_address->type != NX_JSON_STRING) {
 		LOGP(DGPRS, LOGL_ERROR, "REST call failed: no IP address received\n");
-		return;
+		goto reject;
 	}
 	
 	LOGP(DGPRS, LOGL_ERROR, "REST response: address=%s dns1=%s dns2=%s\n", 
 			json_address->text_value, json_dns1->text_value, json_dns2->text_value);
 
-	//TODO: send response upon successful retrieval to 
-	// static int create_pdp_conf(struct pdp_t *pdp, void *cbp, int cause)
+	// hack pctx so it looks like Create PDP Context Response from GGSN
+	
+	// fix pctx->lib->radio_pri;
+	// leave same value as for downlink
+	
+	// fix pctx->lib->eua;
+	inet_aton(json_address->text_value, &address);
+	ipv42eua(&(pctx->lib->eua), &address);
+
+	// fix pctx->lib->pco_req
+	pco = &(pctx->lib->pco_req);
+	pco->l = 20;
+	pco->v[0] = 0x80;	/* x0000yyy x=1, yyy=000: PPP */
+	pco->v[1] = 0x80;	/* IPCP */
+	pco->v[2] = 0x21;
+	pco->v[3] = 0x10;	/* Length of contents */
+	pco->v[4] = 0x02;	/* ACK */
+	//pco->v[5] = 0x00;	/* ID: Need to match request */
+	pco->v[6] = 0x00;	/* Length */
+	pco->v[7] = 0x10;
+	pco->v[8] = 0x81;	/* DNS 1 */
+	pco->v[9] = 0x06;
+	inet_aton(json_dns1->text_value, &dns1);
+	memcpy(&pco->v[10], &dns1, sizeof(dns1));
+	pco->v[14] = 0x83;
+	pco->v[15] = 0x06; /* DNS 2 */
+	inet_aton(json_dns2->text_value, &dns2);
+	memcpy(&pco->v[16], &dns2, sizeof(dns2));
+
+	// activate the SNDCP layer
+	sndcp_sm_activate_ind(&pctx->mm->llme->lle[pctx->sapi], pctx->nsapi);
+
+	// send modified GTP message to MS
+	gsm48_tx_gsm_act_pdp_acc(pctx);
+	return;
+
+reject:
+	/*
+	 * In case of a timeout pdp will be NULL but we have a valid pointer
+	 * in pctx->lib. For other rejects pctx->lib and pdp might be the
+	 * same.
+	 */
+	pctx->state = PDP_STATE_NONE;
+	if (pctx->lib)
+		pdp_freepdp(pctx->lib);
+	pctx->lib = NULL;
+
+	/* Send PDP CTX ACT REJ to MS */
+	gsm48_tx_gsm_act_pdp_rej(pctx->mm, pctx->ti, GSM_CAUSE_NET_FAIL, 0, NULL);
+	sgsn_pdp_ctx_free(pctx);
 }
 
 /**

@@ -289,7 +289,6 @@ static int create_pdp_conf(struct pdp_t *pdp, void *cbp, int cause)
 	/* Check for cause value if it was really successful */
 	if (cause < 0) {
 		LOGP(DGPRS, LOGL_NOTICE, "Create PDP ctx req timed out\n");
-		//XXX: SDN: what about REST?
 		if (pdp && pdp->version == 1) {
 			pdp->version = 0;
 			gtp_create_context_req(sgsn->gsn, pdp, cbp);
