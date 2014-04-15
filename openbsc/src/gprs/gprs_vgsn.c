@@ -132,7 +132,7 @@ int vgsn_rest_delete_context_req(
 	mm = pctx->mm;
 
 	// inform controller of our intent
-	snprintf(req, sizeof(req)-1, "%s?gprs/pdp/remove&imsi=%s&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u",
+	snprintf(req, sizeof(req)-1, "%sgprs/pdp/remove&imsi=%s&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u",
 			rest->remote_url,
 			mm->imsi,
 			pctx->sapi,
@@ -140,8 +140,10 @@ int vgsn_rest_delete_context_req(
 			mm->ra.mcc, mm->ra.mnc, mm->ra.lac, mm->ra.rac
 			);
 
-	if (curl_get(rest->curl, req, 0, 0))
-		return -1;
+	//TODO: ked bude controller vediet, co od neho chceme, 
+	// povedzme mu, ze sme mu znicili PDP kontext...
+	// if (curl_get(rest->curl, req, 0, 0))
+	//	return -1;
 
 	//XXX: maybe we should wait for some response from controller, before teardown?
 
@@ -263,7 +265,7 @@ int vgsn_rest_create_context_req(
 	mm = pctx->mm;
 
 	// create our REST request
-	snprintf(req, sizeof(req)-1, "%s?gprs/pdp/add&imsi=%s&bvci=%u&tlli=%x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s", 
+	snprintf(req, sizeof(req)-1, "%sgprs/pdp/add&imsi=%s&bvci=%u&tlli=%x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s", 
 			rest->remote_url,
 			mm->imsi,
 			mm->bvci,
