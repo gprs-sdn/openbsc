@@ -246,6 +246,8 @@ int curl_get(struct curl_conn *conn, char *url, curl_recv_cb *cb, void *ctx)
 {
 	struct curl_req *req;
 
+	LOGP(DGPRS, LOGL_NOTICE, "curl_get: %s\n", url);
+
 	// create new request 
 	req = curl_req_create(url, cb, ctx, 0, 0);
 	if (!req) {

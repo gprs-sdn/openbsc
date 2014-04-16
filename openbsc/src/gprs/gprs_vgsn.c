@@ -265,7 +265,7 @@ int vgsn_rest_create_context_req(
 	mm = pctx->mm;
 
 	// create our REST request
-	snprintf(req, sizeof(req)-1, "%sgprs/pdp/add&imsi=%s&bvci=%u&tlli=%x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s", 
+	snprintf(req, sizeof(req)-1, "%sgprs/pdp/add&imsi=%s&bvci=%u&tlli=%08x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s&drx_param=%04x", 
 			rest->remote_url,
 			mm->imsi,
 			mm->bvci,
@@ -273,7 +273,8 @@ int vgsn_rest_create_context_req(
 			pctx->sapi, 
 			pctx->nsapi,
 			mm->ra.mcc, mm->ra.mnc, mm->ra.lac, mm->ra.rac,
-			pdp->apn_use.v+1	//XXX: dirty, make some validation / apn_use.l
+			pdp->apn_use.v+1,	//XXX: dirty, make some validation / apn_use.l
+			mm->drx_parms			//XXX: FIXME: mm->drx_params is invalid?? 
 			);
 
 	// execute this request
