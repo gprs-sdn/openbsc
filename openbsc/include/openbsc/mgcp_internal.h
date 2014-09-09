@@ -20,8 +20,7 @@
  *
  */
 
-#ifndef OPENBSC_MGCP_DATA_H
-#define OPENBSC_MGCP_DATA_H
+#pragma once
 
 #include <osmocom/core/select.h>
 
@@ -68,6 +67,17 @@ struct mgcp_rtp_state {
 	struct mgcp_rtp_stream_state out_stream;
 };
 
+struct mgcp_rtp_codec {
+	uint32_t rate;
+	int channels;
+	uint32_t frame_duration_num;
+	uint32_t frame_duration_den;
+
+	int payload_type;
+	char *audio_name;
+	char *subtype_name;
+};
+
 struct mgcp_rtp_end {
 	/* statistics */
 	unsigned int packets;
@@ -78,19 +88,21 @@ struct mgcp_rtp_end {
 	/* in network byte order */
 	int rtp_port, rtcp_port;
 
+	/* audio codec information */
+	struct mgcp_rtp_codec codec;
+	struct mgcp_rtp_codec alt_codec; /* TODO/XXX: make it generic */
+
 	/* per endpoint data */
-	int payload_type;
-	uint32_t rate;
-	uint32_t frame_duration_num;
-	uint32_t frame_duration_den;
 	int  frames_per_packet;
 	uint32_t packet_duration_ms;
 	char *fmtp_extra;
 	int output_enabled;
+	int force_output_ptime;
 
 	/* RTP patching */
 	int force_constant_ssrc; /* -1: always, 0: don't, 1: once */
 	int force_aligned_timing;
+	void *rtp_process_data;
 
 	/*
 	 * Each end has a socket...
@@ -119,6 +131,7 @@ struct mgcp_rtp_tap {
 
 struct mgcp_lco {
 	char *string;
+	char *codec;
 	int pkt_period_min; /* time in ms */
 	int pkt_period_max; /* time in ms */
 };
@@ -126,7 +139,11 @@ struct mgcp_lco {
 enum mgcp_type {
 	MGCP_RTP_DEFAULT	= 0,
 	MGCP_RTP_TRANSCODED,
+	MGCP_OSMUX_BSC,
+	MGCP_OSMUX_BSC_NAT,
 };
+
+#include <openbsc/osmux.h>
 
 struct mgcp_endpoint {
 	int allocated;
@@ -163,6 +180,17 @@ struct mgcp_endpoint {
 
 	/* tap for the endpoint */
 	struct mgcp_rtp_tap taps[MGCP_TAP_COUNT];
+
+	struct {
+		/* Osmux state: disabled, activating, active */
+		enum osmux_state state;
+		/* Allocated Osmux circuit ID for this endpoint */
+		uint8_t cid;
+		/* handle to batch messages */
+		struct osmux_in_handle *in;
+		/* handle to unbatch messages */
+		struct osmux_out_handle out;
+	} osmux;
 };
 
 #define ENDPOINT_NUMBER(endp) abs(endp - endp->tcfg->endpoints)
@@ -197,5 +225,23 @@ void mgcp_state_calc_loss(struct mgcp_rtp_state *s, struct mgcp_rtp_end *,
 			uint32_t *expected, int *loss);
 uint32_t mgcp_state_calc_jitter(struct mgcp_rtp_state *);
 
+/* payload processing default functions */
+int mgcp_rtp_processing_default(struct mgcp_endpoint *endp, struct mgcp_rtp_end *dst_end,
+				char *data, int *len, int buf_size);
 
-#endif
+int mgcp_setup_rtp_processing_default(struct mgcp_endpoint *endp,
+				      struct mgcp_rtp_end *dst_end,
+				      struct mgcp_rtp_end *src_end);
+
+void mgcp_get_net_downlink_format_default(struct mgcp_endpoint *endp,
+					  int *payload_type,
+					  const char**subtype_name,
+					  const char**fmtp_extra);
+
+enum {
+	MGCP_DEST_NET = 0,
+	MGCP_DEST_BTS,
+};
+
+#define MGCP_DUMMY_LOAD 0x23
+

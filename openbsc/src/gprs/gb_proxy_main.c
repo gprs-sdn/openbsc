@@ -48,6 +48,7 @@
 #include <osmocom/vty/command.h>
 #include <osmocom/vty/telnet_interface.h>
 #include <osmocom/vty/logging.h>
+#include <osmocom/vty/ports.h>
 
 #include "../../bscconfig.h"
 
@@ -66,7 +67,7 @@ const char *openbsc_copyright =
 	"There is NO WARRANTY, to the extent permitted by law.\r\n";
 
 static char *config_file = "osmo_gbproxy.cfg";
-struct gbproxy_config gbcfg;
+struct gbproxy_config gbcfg = {0};
 static int daemonize = 0;
 
 /* Pointer to the SGSN peer */
@@ -80,7 +81,7 @@ static int proxy_ns_cb(enum gprs_ns_evt event, struct gprs_nsvc *nsvc,
 
 	switch (event) {
 	case GPRS_NS_EVT_UNIT_DATA:
-		rc = gbprox_rcvmsg(msg, nsvc->nsei, bvci, nsvc->nsvci);
+		rc = gbprox_rcvmsg(&gbcfg, msg, nsvc->nsei, bvci, nsvc->nsvci);
 		break;
 	default:
 		LOGP(DGPRS, LOGL_ERROR, "SGSN: Unknown event %u from NS\n", event);
@@ -250,7 +251,7 @@ int main(int argc, char **argv)
 
 	rate_ctr_init(tall_bsc_ctx);
 
-	rc = telnet_init(tall_bsc_ctx, &dummy_network, 4246);
+	rc = telnet_init(tall_bsc_ctx, &dummy_network, OSMO_VTY_PORT_GBPROXY);
 	if (rc < 0)
 		exit(1);
 
@@ -259,11 +260,12 @@ int main(int argc, char **argv)
 		LOGP(DGPRS, LOGL_ERROR, "Unable to instantiate NS\n");
 		exit(1);
 	}
+	gbproxy_init_config(&gbcfg);
 	gbcfg.nsi = bssgp_nsi;
 	gprs_ns_vty_init(bssgp_nsi);
 	gprs_ns_set_log_ss(DNS);
 	bssgp_set_log_ss(DBSSGP);
-	osmo_signal_register_handler(SS_L_NS, &gbprox_signal, NULL);
+	osmo_signal_register_handler(SS_L_NS, &gbprox_signal, &gbcfg);
 
 	rc = gbproxy_parse_config(config_file, &gbcfg);
 	if (rc < 0) {

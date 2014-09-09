@@ -33,6 +33,7 @@
 #include <osmocom/core/utils.h>
 #include <osmocom/vty/logging.h>
 #include <osmocom/vty/misc.h>
+#include <openbsc/osmux.h>
 
 #include <osmocom/sccp/sccp.h>
 
@@ -172,6 +173,8 @@ static void config_write_bsc_single(struct vty *vty, struct bsc_config *bsc)
 	if (bsc->paging_group != -1)
 		vty_out(vty, "  paging group %d%s", bsc->paging_group, VTY_NEWLINE);
 	vty_out(vty, "  paging forbidden %d%s", bsc->forbid_paging, VTY_NEWLINE);
+	if (bsc->osmux)
+		vty_out(vty, "  osmux on%s", VTY_NEWLINE);
 }
 
 static int config_write_bsc(struct vty *vty)
@@ -1175,6 +1178,37 @@ DEFUN(show_ussd_connection,
 	return CMD_SUCCESS;
 }
 
+#define OSMUX_STR "RTP multiplexing\n"
+DEFUN(cfg_bsc_osmux,
+      cfg_bsc_osmux_cmd,
+      "osmux (on|off)",
+       OSMUX_STR "Enable OSMUX\n" "Disable OSMUX\n")
+{
+	struct bsc_config *conf = vty->index;
+	int old = conf->osmux;
+
+	if (strcmp(argv[0], "on") == 0)
+		conf->osmux = 1;
+	else if (strcmp(argv[0], "off") == 0)
+		conf->osmux = 0;
+
+	if (old == 0 && conf->osmux == 1) {
+		if (osmux_init(OSMUX_ROLE_BSC_NAT, conf->nat->mgcp_cfg) < 0) {
+			LOGP(DMGCP, LOGL_ERROR, "Cannot init OSMUX\n");
+			return -1;
+		}
+		LOGP(DMGCP, LOGL_NOTICE, "Setting up OSMUX socket\n");
+	} else if (old == 1 && conf->osmux == 0) {
+		LOGP(DMGCP, LOGL_NOTICE, "Disabling OSMUX socket\n");
+		/* Don't stop the socket, we may already have ongoing voice
+		 * flows already using Osmux. This just switch indicates that
+		 * new upcoming flows should use RTP.
+		 */
+	}
+
+	return CMD_SUCCESS;
+}
+
 int bsc_nat_vty_init(struct bsc_nat *nat)
 {
 	_nat = nat;
@@ -1260,6 +1294,7 @@ int bsc_nat_vty_init(struct bsc_nat *nat)
 	install_element(NAT_BSC_NODE, &cfg_bsc_old_grp_cmd);
 	install_element(NAT_BSC_NODE, &cfg_bsc_paging_grp_cmd);
 	install_element(NAT_BSC_NODE, &cfg_bsc_no_paging_grp_cmd);
+	install_element(NAT_BSC_NODE, &cfg_bsc_osmux_cmd);
 
 	mgcp_vty_init();
 

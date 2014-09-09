@@ -2,7 +2,7 @@
 /* The protocol implementation */
 
 /*
- * (C) 2009-2011 by Holger Hans Peter Freyther <zecke@selfish.org>
+ * (C) 2009-2014 by Holger Hans Peter Freyther <zecke@selfish.org>
  * (C) 2009-2011 by On-Waves
  * All Rights Reserved
  *
@@ -128,9 +128,45 @@ static int config_write_mgcp(struct vty *vty)
 	else
 		vty_out(vty, "  rtp transcoder-range %u %u%s",
 			g_cfg->transcoder_ports.range_start, g_cfg->transcoder_ports.range_end, VTY_NEWLINE);
+	if (g_cfg->bts_force_ptime > 0)
+		vty_out(vty, "  rtp force-ptime %d%s", g_cfg->bts_force_ptime, VTY_NEWLINE);
 	vty_out(vty, "  transcoder-remote-base %u%s", g_cfg->transcoder_remote_base, VTY_NEWLINE);
-
+	vty_out(vty, "  osmux %s%s",
+		g_cfg->osmux == 1 ? "on" : "off", VTY_NEWLINE);
+	if (g_cfg->osmux) {
+		vty_out(vty, "  osmux batch-factor %d%s",
+			g_cfg->osmux_batch, VTY_NEWLINE);
+		vty_out(vty, "  osmux batch-size %u%s",
+			g_cfg->osmux_batch_size, VTY_NEWLINE);
+		vty_out(vty, "  osmux port %u%s",
+			g_cfg->osmux_port, VTY_NEWLINE);
+	}
 	return CMD_SUCCESS;
+}
+
+static void dump_rtp_end(const char *end_name, struct vty *vty,
+			struct mgcp_rtp_state *state, struct mgcp_rtp_end *end)
+{
+	struct mgcp_rtp_codec *codec = &end->codec;
+
+	vty_out(vty,
+		"  %s%s"
+		"   Timestamp Errs: %d->%d%s"
+		"   Dropped Packets: %d%s"
+		"   Payload Type: %d Rate: %u Channels: %d %s"
+		"   Frame Duration: %u Frame Denominator: %u%s"
+		"   FPP: %d Packet Duration: %u%s"
+		"   FMTP-Extra: %s Audio-Name: %s Sub-Type: %s%s"
+		"   Output-Enabled: %d Force-PTIME: %d%s",
+		end_name, VTY_NEWLINE,
+		state->in_stream.err_ts_counter,
+		state->out_stream.err_ts_counter, VTY_NEWLINE,
+		end->dropped_packets, VTY_NEWLINE,
+		codec->payload_type, codec->rate, codec->channels, VTY_NEWLINE,
+		codec->frame_duration_num, codec->frame_duration_den, VTY_NEWLINE,
+		end->frames_per_packet, end->packet_duration_ms, VTY_NEWLINE,
+		end->fmtp_extra, codec->audio_name, codec->subtype_name, VTY_NEWLINE,
+		end->output_enabled, end->force_output_ptime, VTY_NEWLINE);
 }
 
 static void dump_trunk(struct vty *vty, struct mgcp_trunk_config *cfg, int verbose)
@@ -159,19 +195,9 @@ static void dump_trunk(struct vty *vty, struct mgcp_trunk_config *cfg, int verbo
 			endp->trans_net.packets, endp->trans_bts.packets,
 			VTY_NEWLINE);
 
-		if (verbose) {
-			vty_out(vty,
-				"  Timestamp Errs: BTS %d->%d, Net %d->%d%s",
-				endp->bts_state.in_stream.err_ts_counter,
-				endp->bts_state.out_stream.err_ts_counter,
-				endp->net_state.in_stream.err_ts_counter,
-				endp->net_state.out_stream.err_ts_counter,
-				VTY_NEWLINE);
-			vty_out(vty,
-				"  Dropped Packets: Net->BTS %d, BTS->Net %d%s",
-				endp->bts_end.dropped_packets,
-				endp->net_end.dropped_packets,
-				VTY_NEWLINE);
+		if (verbose && endp->allocated) {
+			dump_rtp_end("Net->BTS", vty, &endp->bts_state, &endp->bts_end);
+			dump_rtp_end("BTS->Net", vty, &endp->net_state, &endp->net_end);
 		}
 	}
 }
@@ -362,6 +388,27 @@ ALIAS_DEPRECATED(cfg_mgcp_rtp_ip_dscp, cfg_mgcp_rtp_ip_tos_cmd,
       RTP_STR
       "Apply IP_TOS to the audio stream\n" "The DSCP value\n")
 
+#define FORCE_PTIME_STR "Force a fixed ptime for packets sent to the BTS"
+DEFUN(cfg_mgcp_rtp_force_ptime,
+      cfg_mgcp_rtp_force_ptime_cmd,
+      "rtp force-ptime (10|20|40)",
+      RTP_STR FORCE_PTIME_STR
+      "The required ptime (packet duration) in ms\n"
+      "10 ms\n20 ms\n40 ms\n")
+{
+	g_cfg->bts_force_ptime = atoi(argv[0]);
+	return CMD_SUCCESS;
+}
+
+DEFUN(cfg_mgcp_no_rtp_force_ptime,
+      cfg_mgcp_no_rtp_force_ptime_cmd,
+      "no rtp force-ptime",
+      NO_STR RTP_STR FORCE_PTIME_STR)
+{
+	g_cfg->bts_force_ptime = 0;
+	return CMD_SUCCESS;
+}
+
 DEFUN(cfg_mgcp_sdp_fmtp_extra,
       cfg_mgcp_sdp_fmtp_extra_cmd,
       "sdp audio fmtp-extra .NAME",
@@ -434,6 +481,10 @@ DEFUN(cfg_mgcp_loop,
       "Loop audio for all endpoints on main trunk\n"
       "Don't Loop\n" "Loop\n")
 {
+	if (g_cfg->osmux) {
+		vty_out(vty, "Cannot use `loop' with `osmux'.%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
 	g_cfg->trunk.audio_loop = atoi(argv[0]);
 	return CMD_SUCCESS;
 }
@@ -726,6 +777,10 @@ DEFUN(cfg_trunk_loop,
 {
 	struct mgcp_trunk_config *trunk = vty->index;
 
+	if (g_cfg->osmux) {
+		vty_out(vty, "Cannot use `loop' with `osmux'.%s", VTY_NEWLINE);
+		return CMD_WARNING;
+	}
 	trunk->audio_loop = atoi(argv[0]);
 	return CMD_SUCCESS;
 }
@@ -999,7 +1054,7 @@ DEFUN(free_endp, free_endp_cmd,
 	}
 
 	endp = &trunk->endpoints[endp_no];
-	mgcp_free_endp(endp);
+	mgcp_release_endp(endp);
 	return CMD_SUCCESS;
 }
 
@@ -1056,6 +1111,51 @@ DEFUN(reset_all_endp, reset_all_endp_cmd,
 	return CMD_SUCCESS;
 }
 
+#define OSMUX_STR "RTP multiplexing\n"
+DEFUN(cfg_mgcp_osmux,
+      cfg_mgcp_osmux_cmd,
+      "osmux (on|off)",
+       OSMUX_STR "Enable OSMUX\n" "Disable OSMUX\n")
+{
+	if (strcmp(argv[0], "on") == 0) {
+		g_cfg->osmux = 1;
+		if (g_cfg->trunk.audio_loop) {
+			vty_out(vty, "Cannot use `loop' with `osmux'.%s",
+				VTY_NEWLINE);
+			return CMD_WARNING;
+		}
+	} else if (strcmp(argv[0], "off") == 0)
+		g_cfg->osmux = 0;
+
+	return CMD_SUCCESS;
+}
+
+DEFUN(cfg_mgcp_osmux_batch_factor,
+      cfg_mgcp_osmux_batch_factor_cmd,
+      "osmux batch-factor <1-8>",
+      OSMUX_STR "Batching factor\n" "Number of messages in the batch\n")
+{
+	g_cfg->osmux_batch = atoi(argv[0]);
+	return CMD_SUCCESS;
+}
+
+DEFUN(cfg_mgcp_osmux_batch_size,
+      cfg_mgcp_osmux_batch_size_cmd,
+      "osmux batch-size <1-65535>",
+      OSMUX_STR "batch size\n" "Batch size in bytes\n")
+{
+	g_cfg->osmux_batch_size = atoi(argv[0]);
+	return CMD_SUCCESS;
+}
+
+DEFUN(cfg_mgcp_osmux_port,
+      cfg_mgcp_osmux_port_cmd,
+      "osmux port <1-65535>",
+      OSMUX_STR "port\n" "UDP port\n")
+{
+	g_cfg->osmux_port = atoi(argv[0]);
+	return CMD_SUCCESS;
+}
 
 int mgcp_vty_init(void)
 {
@@ -1084,6 +1184,8 @@ int mgcp_vty_init(void)
 	install_element(MGCP_NODE, &cfg_mgcp_rtp_transcoder_base_cmd);
 	install_element(MGCP_NODE, &cfg_mgcp_rtp_ip_dscp_cmd);
 	install_element(MGCP_NODE, &cfg_mgcp_rtp_ip_tos_cmd);
+	install_element(MGCP_NODE, &cfg_mgcp_rtp_force_ptime_cmd);
+	install_element(MGCP_NODE, &cfg_mgcp_no_rtp_force_ptime_cmd);
 	install_element(MGCP_NODE, &cfg_mgcp_rtp_keepalive_cmd);
 	install_element(MGCP_NODE, &cfg_mgcp_rtp_keepalive_once_cmd);
 	install_element(MGCP_NODE, &cfg_mgcp_no_rtp_keepalive_cmd);
@@ -1108,6 +1210,10 @@ int mgcp_vty_init(void)
 	install_element(MGCP_NODE, &cfg_mgcp_sdp_fmtp_extra_cmd);
 	install_element(MGCP_NODE, &cfg_mgcp_sdp_payload_send_ptime_cmd);
 	install_element(MGCP_NODE, &cfg_mgcp_no_sdp_payload_send_ptime_cmd);
+	install_element(MGCP_NODE, &cfg_mgcp_osmux_cmd);
+	install_element(MGCP_NODE, &cfg_mgcp_osmux_batch_factor_cmd);
+	install_element(MGCP_NODE, &cfg_mgcp_osmux_batch_size_cmd);
+	install_element(MGCP_NODE, &cfg_mgcp_osmux_port_cmd);
 
 	install_element(MGCP_NODE, &cfg_mgcp_trunk_cmd);
 	install_node(&trunk_node, config_write_trunk);
@@ -1202,6 +1308,10 @@ int mgcp_parse_config(const char *config_file, struct mgcp_config *cfg,
 {
 	int rc;
 	struct mgcp_trunk_config *trunk;
+
+	cfg->osmux_port = OSMUX_PORT;
+	cfg->osmux_batch = 4;
+	cfg->osmux_batch_size = OSMUX_BATCH_DEFAULT_MAX;
 
 	g_cfg = cfg;
 	rc = vty_read_config_file(config_file, NULL);

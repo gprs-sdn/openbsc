@@ -44,8 +44,8 @@
 #include <openbsc/socket.h>
 #include <openbsc/vty.h>
 
-#include <openbsc/control_cmd.h>
-#include <openbsc/control_if.h>
+#include <osmocom/ctrl/control_cmd.h>
+#include <osmocom/ctrl/control_if.h>
 
 #include <osmocom/core/application.h>
 #include <osmocom/core/talloc.h>
@@ -57,6 +57,7 @@
 #include <osmocom/vty/telnet_interface.h>
 #include <osmocom/vty/vty.h>
 #include <osmocom/vty/logging.h>
+#include <osmocom/vty/ports.h>
 
 #include <osmocom/sccp/sccp.h>
 
@@ -243,7 +244,7 @@ static void nat_send_rlsd_msc(struct nat_sccp_connection *conn)
 	if (!msg)
 		return;
 
-	ipaccess_prepend_header(msg, IPAC_PROTO_SCCP);
+	ipa_prepend_header(msg, IPAC_PROTO_SCCP);
 	queue_for_msc(conn->msc_con, msg);
 }
 
@@ -319,7 +320,7 @@ static void nat_send_rlc(struct bsc_msc_connection *msc_con,
 	rlc->destination_local_reference = *dst;
 	rlc->source_local_reference = *src;
 
-	ipaccess_prepend_header(msg, IPAC_PROTO_SCCP);
+	ipa_prepend_header(msg, IPAC_PROTO_SCCP);
 
 	queue_for_msc(msc_con, msg);
 }
@@ -335,7 +336,7 @@ static void send_mgcp_reset(struct bsc_connection *bsc)
 
 void bsc_nat_send_mgcp_to_msc(struct bsc_nat *nat, struct msgb *msg)
 {
-	ipaccess_prepend_header(msg, IPAC_PROTO_MGCP_OLD);
+	ipa_prepend_header(msg, IPAC_PROTO_MGCP_OLD);
 	queue_for_msc(nat->msc_con, msg);
 }
 
@@ -359,7 +360,7 @@ static void send_id_get_response(struct bsc_msc_connection *msc_con)
 	if (!msg)
 		return;
 
-	ipaccess_prepend_header(msg, IPAC_PROTO_IPACCESS);
+	ipa_prepend_header(msg, IPAC_PROTO_IPACCESS);
 	queue_for_msc(msc_con, msg);
 }
 
@@ -433,7 +434,7 @@ static void bsc_send_con_release(struct bsc_connection *bsc,
 	if (!rlsd)
 		LOGP(DNAT, LOGL_ERROR, "Failed to create RLSD message.\n");
 	else {
-		ipaccess_prepend_header(rlsd, IPAC_PROTO_SCCP);
+		ipa_prepend_header(rlsd, IPAC_PROTO_SCCP);
 		queue_for_msc(con->msc_con, rlsd);
 	}
 	con->con_local = NAT_CON_END_LOCAL;
@@ -825,10 +826,10 @@ static int ipaccess_msc_read_cb(struct osmo_fd *bfd)
 
 	/* handle base message handling */
 	hh = (struct ipaccess_head *) msg->data;
-	ipaccess_rcvmsg_base(msg, bfd);
 
 	/* initialize the networking. This includes sending a GSM08.08 message */
 	if (hh->proto == IPAC_PROTO_IPACCESS) {
+		ipa_ccm_rcvmsg_base(msg, bfd);
 		if (msg->l2h[0] == IPAC_MSGT_ID_ACK)
 			initialize_msc_if_needed(msc_con);
 		else if (msg->l2h[0] == IPAC_MSGT_ID_GET)
@@ -1180,7 +1181,7 @@ exit:
 		if (msg->l2h[0] == IPAC_MSGT_ID_RESP) {
 			struct tlv_parsed tvp;
 			int ret;
-			ret = ipaccess_idtag_parse(&tvp,
+			ret = ipa_ccm_idtag_parse(&tvp,
 					     (unsigned char *) msg->l2h + 2,
 					     msgb_l2len(msg) - 2);
 			if (ret < 0) {
@@ -1534,7 +1535,7 @@ int main(int argc, char **argv)
 	rate_ctr_init(tall_bsc_ctx);
 
 	/* init vty and parse */
-	telnet_init(tall_bsc_ctx, NULL, 4244);
+	telnet_init(tall_bsc_ctx, NULL, OSMO_VTY_PORT_BSC_NAT);
 	if (mgcp_parse_config(config_file, nat->mgcp_cfg, MGCP_BSC_NAT) < 0) {
 		fprintf(stderr, "Failed to parse the config file: '%s'\n", config_file);
 		return -3;

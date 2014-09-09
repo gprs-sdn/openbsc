@@ -176,6 +176,9 @@ struct bsc_config {
 	struct bsc_config_stats stats;
 
 	struct llist_head lac_list;
+
+	/* Osmux is enabled/disabled per BSC */
+	int osmux;
 };
 
 struct bsc_lac_entry {
@@ -418,7 +421,7 @@ int bsc_mgcp_nat_init(struct bsc_nat *nat);
 
 struct nat_sccp_connection *bsc_mgcp_find_con(struct bsc_nat *, int endpoint_number);
 struct msgb *bsc_mgcp_rewrite(char *input, int length, int endp, const char *ip,
-			      int port, int *payload_type);
+			      int port, int osmux, int *payload_type);
 void bsc_mgcp_forward(struct bsc_connection *bsc, struct msgb *msg);
 
 void bsc_mgcp_clear_endpoints_for(struct bsc_connection *bsc);
@@ -494,5 +497,11 @@ int bsc_nat_handle_ctrlif_msg(struct bsc_connection *bsc, struct msgb *msg);
 
 int bsc_nat_extract_lac(struct bsc_connection *bsc, struct nat_sccp_connection *con,
 				struct bsc_nat_parsed *parsed, struct msgb *msg);
+
+
+/*
+ * Use for testing
+ */
+void bsc_nat_free(struct bsc_nat *nat);
 
 #endif

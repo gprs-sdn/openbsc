@@ -28,6 +28,7 @@
 #include <time.h>
 #include <limits.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include <osmocom/core/msgb.h>
 #include <osmocom/core/talloc.h>
@@ -77,6 +78,9 @@ char *strline_r(char *str, char **saveptr)
 #define DEFAULT_RTP_AUDIO_FRAME_DUR_DEN 1000
 #define DEFAULT_RTP_AUDIO_PACKET_DURATION_MS 20
 #define DEFAULT_RTP_AUDIO_DEFAULT_RATE  8000
+#define DEFAULT_RTP_AUDIO_DEFAULT_CHANNELS 1
+
+#define PTYPE_UNDEFINED (-1)
 
 static void mgcp_rtp_end_reset(struct mgcp_rtp_end *end);
 
@@ -107,7 +111,22 @@ static struct msgb *handle_noti_req(struct mgcp_parse_data *data);
 static void create_transcoder(struct mgcp_endpoint *endp);
 static void delete_transcoder(struct mgcp_endpoint *endp);
 
+static void setup_rtp_processing(struct mgcp_endpoint *endp);
+
 static int mgcp_analyze_header(struct mgcp_parse_data *parse, char *data);
+
+static int mgcp_check_param(const struct mgcp_endpoint *endp, const char *line)
+{
+	const size_t line_len = strlen(line);
+	if (line[0] != '\0' && line_len < 2) {
+		LOGP(DMGCP, LOGL_ERROR,
+			"Wrong MGCP option format: '%s' on 0x%x\n",
+			line, ENDPOINT_NUMBER(endp));
+		return 0;
+	}
+
+	return 1;
+}
 
 static uint32_t generate_call_id(struct mgcp_config *cfg)
 {
@@ -224,49 +243,116 @@ static struct msgb *create_err_response(struct mgcp_endpoint *endp,
 	return create_resp(endp, code, " FAIL", msg, trans, NULL, NULL);
 }
 
-static struct msgb *create_response_with_sdp(struct mgcp_endpoint *endp,
-					     const char *msg, const char *trans_id)
+static int write_response_sdp(struct mgcp_endpoint *endp,
+			      char *sdp_record, size_t size, const char *addr)
 {
-	const char *addr = endp->cfg->local_ip;
-	const char *fmtp_extra = endp->bts_end.fmtp_extra;
-	char sdp_record[4096];
+	const char *fmtp_extra;
+	const char *audio_name;
+	int payload_type;
 	int len;
+	int nchars;
 
-	if (!addr)
-		addr = endp->cfg->source_addr;
+	endp->cfg->get_net_downlink_format_cb(endp, &payload_type,
+					      &audio_name, &fmtp_extra);
 
-	len = snprintf(sdp_record, sizeof(sdp_record) - 1,
-			"I: %u\n\n"
+	len = snprintf(sdp_record, size,
 			"v=0\r\n"
 			"o=- %u 23 IN IP4 %s\r\n"
 			"c=IN IP4 %s\r\n"
-			"t=0 0\r\n"
-			"m=audio %d RTP/AVP %d\r\n"
-			"a=rtpmap:%d %s\r\n"
-			"%s%s",
-			endp->ci, endp->ci, addr, addr,
-			endp->net_end.local_port, endp->bts_end.payload_type,
-			endp->bts_end.payload_type, endp->tcfg->audio_name,
-			fmtp_extra ? fmtp_extra : "", fmtp_extra ? "\r\n" : "");
+			"t=0 0\r\n",
+			endp->ci, addr, addr);
 
-	if (len < 0 || len >= sizeof(sdp_record))
+	if (len < 0 || len >= size)
 		goto buffer_too_small;
 
+	if (payload_type >= 0) {
+		nchars = snprintf(sdp_record + len, size - len,
+				  "m=audio %d RTP/AVP %d\r\n",
+				  endp->net_end.local_port, payload_type);
+		if (nchars < 0 || nchars >= size - len)
+			goto buffer_too_small;
+
+		len += nchars;
+
+		if (audio_name) {
+			nchars = snprintf(sdp_record + len, size - len,
+					  "a=rtpmap:%d %s\r\n",
+					  payload_type, audio_name);
+
+			if (nchars < 0 || nchars >= size - len)
+				goto buffer_too_small;
+
+			len += nchars;
+		}
+
+		if (fmtp_extra) {
+			nchars = snprintf(sdp_record + len, size - len,
+					  "%s\r\n", fmtp_extra);
+
+			if (nchars < 0 || nchars >= size - len)
+				goto buffer_too_small;
+
+			len += nchars;
+		}
+	}
 	if (endp->bts_end.packet_duration_ms > 0 && endp->tcfg->audio_send_ptime) {
-		int nchars = snprintf(sdp_record + len, sizeof(sdp_record) - len,
-				      "a=ptime:%d\r\n",
-				      endp->bts_end.packet_duration_ms);
-		if (nchars < 0 || nchars >= sizeof(sdp_record) - len)
+		nchars = snprintf(sdp_record + len, size - len,
+				  "a=ptime:%d\r\n",
+				  endp->bts_end.packet_duration_ms);
+		if (nchars < 0 || nchars >= size - len)
 			goto buffer_too_small;
 
 		len += nchars;
 	}
-	return create_resp(endp, 200, " OK", msg, trans_id, NULL, sdp_record);
+
+	return len;
 
 buffer_too_small:
 	LOGP(DMGCP, LOGL_ERROR, "SDP buffer too small: %d (needed %d)\n",
-	     sizeof(sdp_record), len);
-	return NULL;
+	     size, len);
+	return -1;
+}
+
+static struct msgb *create_response_with_sdp(struct mgcp_endpoint *endp,
+					     const char *msg, const char *trans_id)
+{
+	const char *addr = endp->cfg->local_ip;
+	char sdp_record[4096];
+	int len;
+	int nchars;
+	char osmux_extension[strlen("\nX-Osmux: 255") + 1];
+
+	if (!addr)
+		addr = endp->cfg->source_addr;
+
+	if (endp->osmux.state == OSMUX_STATE_ACTIVATING)
+		sprintf(osmux_extension, "\nX-Osmux: %u", endp->osmux.cid);
+	else
+		osmux_extension[0] = '\0';
+
+	len = snprintf(sdp_record, sizeof(sdp_record),
+		       "I: %u%s\n\n", endp->ci, osmux_extension);
+	if (len < 0)
+		return NULL;
+
+	nchars = write_response_sdp(endp, sdp_record + len,
+				    sizeof(sdp_record) - len - 1, addr);
+	if (nchars < 0)
+		return NULL;
+
+	len += nchars;
+
+	sdp_record[sizeof(sdp_record) - 1] = '\0';
+
+	return create_resp(endp, 200, " OK", msg, trans_id, NULL, sdp_record);
+}
+
+static void send_dummy(struct mgcp_endpoint *endp)
+{
+	if (endp->osmux.state != OSMUX_STATE_DISABLED)
+		osmux_send_dummy(endp);
+	else
+		mgcp_send_dummy(endp);
 }
 
 /*
@@ -512,6 +598,72 @@ static int parse_conn_mode(const char *msg, struct mgcp_endpoint *endp)
 	return ret;
 }
 
+static int set_audio_info(void *ctx, struct mgcp_rtp_codec *codec,
+			  int payload_type, const char *audio_name)
+{
+	int rate = codec->rate;
+	int channels = codec->channels;
+	char audio_codec[64];
+
+	talloc_free(codec->subtype_name);
+	codec->subtype_name = NULL;
+	talloc_free(codec->audio_name);
+	codec->audio_name = NULL;
+
+	if (payload_type != PTYPE_UNDEFINED)
+		codec->payload_type = payload_type;
+
+	if (!audio_name) {
+		switch (payload_type) {
+		case 3: audio_name = "GSM/8000/1"; break;
+		case 8: audio_name = "PCMA/8000/1"; break;
+		case 18: audio_name = "G729/8000/1"; break;
+		default:
+			 /* Payload type is unknown, don't change rate and
+			  * channels. */
+			 /* TODO: return value? */
+			 return 0;
+		}
+	}
+
+	if (sscanf(audio_name, "%63[^/]/%d/%d",
+		   audio_codec, &rate, &channels) < 1)
+		return -EINVAL;
+
+	codec->rate = rate;
+	codec->channels = channels;
+	codec->subtype_name = talloc_strdup(ctx, audio_codec);
+	codec->audio_name = talloc_strdup(ctx, audio_name);
+
+	if (!strcmp(audio_codec, "G729")) {
+		codec->frame_duration_num = 10;
+		codec->frame_duration_den = 1000;
+	} else {
+		codec->frame_duration_num = DEFAULT_RTP_AUDIO_FRAME_DUR_NUM;
+		codec->frame_duration_den = DEFAULT_RTP_AUDIO_FRAME_DUR_DEN;
+	}
+
+	if (payload_type < 0) {
+		payload_type = 96;
+		if (rate == 8000 && channels == 1) {
+			if (!strcmp(audio_codec, "GSM"))
+				payload_type = 3;
+			else if (!strcmp(audio_codec, "PCMA"))
+				payload_type = 8;
+			else if (!strcmp(audio_codec, "G729"))
+				payload_type = 18;
+		}
+
+		codec->payload_type = payload_type;
+	}
+
+	if (channels != 1)
+		LOGP(DMGCP, LOGL_NOTICE,
+		     "Channels != 1 in SDP: '%s'\n", audio_name);
+
+	return 0;
+}
+
 static int allocate_port(struct mgcp_endpoint *endp, struct mgcp_rtp_end *end,
 			 struct mgcp_port_range *range,
 			 int (*alloc)(struct mgcp_endpoint *endp, int port))
@@ -586,7 +738,9 @@ static int parse_sdp_data(struct mgcp_rtp_end *rtp, struct mgcp_parse_data *p)
 {
 	char *line;
 	int found_media = 0;
+	/* TODO/XXX make it more generic */
 	int audio_payload = -1;
+	int audio_payload_alt = -1;
 
 	for_each_line(line, p->save) {
 		switch (line[0]) {
@@ -598,29 +752,20 @@ static int parse_sdp_data(struct mgcp_rtp_end *rtp, struct mgcp_parse_data *p)
 			break;
 		case 'a': {
 			int payload;
-			int rate;
-			int channels = 1;
 			int ptime, ptime2 = 0;
 			char audio_name[64];
-			char audio_codec[64];
 
 			if (audio_payload == -1)
 				break;
 
-			if (sscanf(line, "a=rtpmap:%d %64s",
+			if (sscanf(line, "a=rtpmap:%d %63s",
 				   &payload, audio_name) == 2) {
-				if (payload != audio_payload)
-					break;
-
-				if (sscanf(audio_name, "%[^/]/%d/%d",
-					  audio_codec, &rate, &channels) < 2)
-					break;
-
-				rtp->rate = rate;
-				if (channels != 1)
-					LOGP(DMGCP, LOGL_NOTICE,
-					     "Channels != 1 in SDP: '%s' on 0x%x\n",
-					     line, ENDPOINT_NUMBER(p->endp));
+				if (payload == audio_payload)
+					set_audio_info(p->cfg, &rtp->codec,
+							payload, audio_name);
+				else if (payload == audio_payload_alt)
+					set_audio_info(p->cfg, &rtp->alt_codec,
+							payload, audio_name);
 			} else if (sscanf(line, "a=ptime:%d-%d",
 					  &ptime, &ptime2) >= 1) {
 				if (ptime2 > 0 && ptime2 != ptime)
@@ -628,23 +773,29 @@ static int parse_sdp_data(struct mgcp_rtp_end *rtp, struct mgcp_parse_data *p)
 				else
 					rtp->packet_duration_ms = ptime;
 			} else if (sscanf(line, "a=maxptime:%d", &ptime2) == 1) {
-				if (ptime2 * rtp->frame_duration_den >
-				    rtp->frame_duration_num * 1500)
+				/* TODO/XXX: Store this per codec and derive it on use */
+				if (ptime2 * rtp->codec.frame_duration_den >
+				    rtp->codec.frame_duration_num * 1500)
 					/* more than 1 frame */
 					rtp->packet_duration_ms = 0;
 			}
 			break;
 		}
 		case 'm': {
-			int port;
+			int port, rc;
 			audio_payload = -1;
+			audio_payload_alt = -1;
 
-			if (sscanf(line, "m=audio %d RTP/AVP %d",
-				   &port, &audio_payload) == 2) {
+			rc = sscanf(line, "m=audio %d RTP/AVP %d %d",
+				   &port, &audio_payload, &audio_payload_alt);
+			if (rc >= 2) {
 				rtp->rtp_port = htons(port);
 				rtp->rtcp_port = htons(port + 1);
-				rtp->payload_type = audio_payload;
 				found_media = 1;
+				set_audio_info(p->cfg, &rtp->codec, audio_payload, NULL);
+				if (rc == 3)
+					set_audio_info(p->cfg, &rtp->alt_codec,
+							audio_payload_alt, NULL);
 			}
 			break;
 		}
@@ -671,9 +822,10 @@ static int parse_sdp_data(struct mgcp_rtp_end *rtp, struct mgcp_parse_data *p)
 
 	if (found_media)
 		LOGP(DMGCP, LOGL_NOTICE,
-		     "Got media info via SDP: port %d, payload %d, "
+		     "Got media info via SDP: port %d, payload %d (%s), "
 		     "duration %d, addr %s\n",
-		     ntohs(rtp->rtp_port), rtp->payload_type,
+		     ntohs(rtp->rtp_port), rtp->codec.payload_type,
+		     rtp->codec.subtype_name ? rtp->codec.subtype_name : "unknown",
 		     rtp->packet_duration_ms, inet_ntoa(rtp->addr));
 
 	return found_media;
@@ -686,9 +838,12 @@ static int parse_sdp_data(struct mgcp_rtp_end *rtp, struct mgcp_parse_data *p)
 static void set_local_cx_options(void *ctx, struct mgcp_lco *lco,
 				 const char *options)
 {
-	char *p_opt;
+	char *p_opt, *a_opt;
+	char codec[9];
 
 	talloc_free(lco->string);
+	talloc_free(lco->codec);
+	lco->codec = NULL;
 	lco->pkt_period_min = lco->pkt_period_max = 0;
 	lco->string = talloc_strdup(ctx, options ? options : "");
 
@@ -696,6 +851,10 @@ static void set_local_cx_options(void *ctx, struct mgcp_lco *lco,
 	if (p_opt && sscanf(p_opt, "p:%d-%d",
 			    &lco->pkt_period_min, &lco->pkt_period_max) == 1)
 		lco->pkt_period_max = lco->pkt_period_min;
+
+	a_opt = strstr(lco->string, "a:");
+	if (a_opt && sscanf(a_opt, "a:%8[^,]", codec) == 1)
+		lco->codec = talloc_strdup(ctx, codec);
 }
 
 void mgcp_rtp_end_config(struct mgcp_endpoint *endp, int expect_ssrc_change,
@@ -723,13 +882,43 @@ uint32_t mgcp_rtp_packet_duration(struct mgcp_endpoint *endp,
 	/* Get the number of frames per channel and packet */
 	if (rtp->frames_per_packet)
 		f = rtp->frames_per_packet;
-	else if (rtp->packet_duration_ms && rtp->frame_duration_num) {
-		int den = 1000 * rtp->frame_duration_num;
-		f = (rtp->packet_duration_ms * rtp->frame_duration_den + den/2)
+	else if (rtp->packet_duration_ms && rtp->codec.frame_duration_num) {
+		int den = 1000 * rtp->codec.frame_duration_num;
+		f = (rtp->packet_duration_ms * rtp->codec.frame_duration_den + den/2)
 			/ den;
 	}
 
-	return rtp->rate * f * rtp->frame_duration_num / rtp->frame_duration_den;
+	return rtp->codec.rate * f * rtp->codec.frame_duration_num / rtp->codec.frame_duration_den;
+}
+
+static int mgcp_parse_osmux_cid(const char *line)
+{
+	int osmux_cid;
+
+	if (sscanf(line + 2, "Osmux: %u", &osmux_cid) != 1)
+		return -1;
+
+	if (osmux_cid > OSMUX_CID_MAX) {
+		LOGP(DMGCP, LOGL_ERROR, "Osmux ID too large: %u > %u\n",
+		     osmux_cid, OSMUX_CID_MAX);
+		return -1;
+	}
+	LOGP(DMGCP, LOGL_DEBUG, "bsc-nat offered Osmux CID %u\n", osmux_cid);
+
+	return osmux_cid;
+}
+
+static int mgcp_osmux_setup(struct mgcp_endpoint *endp, const char *line)
+{
+	if (!endp->cfg->osmux_init) {
+		if (osmux_init(OSMUX_ROLE_BSC, endp->cfg) < 0) {
+			LOGP(DMGCP, LOGL_ERROR, "Cannot init OSMUX\n");
+			return -1;
+		}
+		LOGP(DMGCP, LOGL_NOTICE, "OSMUX socket has been set up\n");
+	}
+
+	return mgcp_parse_osmux_cid(line);
 }
 
 static struct msgb *handle_create_con(struct mgcp_parse_data *p)
@@ -742,13 +931,16 @@ static struct msgb *handle_create_con(struct mgcp_parse_data *p)
 	const char *callid = NULL;
 	const char *mode = NULL;
 	char *line;
-	int have_sdp = 0;
+	int have_sdp = 0, osmux_cid = -1;
 
 	if (p->found != 0)
 		return create_err_response(NULL, 510, "CRCX", p->trans);
 
 	/* parse CallID C: and LocalParameters L: */
 	for_each_line(line, p->save) {
+		if (!mgcp_check_param(endp, line))
+			continue;
+
 		switch (line[0]) {
 		case 'L':
 			local_options = (const char *) line + 3;
@@ -758,6 +950,16 @@ static struct msgb *handle_create_con(struct mgcp_parse_data *p)
 			break;
 		case 'M':
 			mode = (const char *) line + 3;
+			break;
+		case 'X':
+			/* Osmux is not enabled in this bsc, ignore it so the
+			 * bsc-nat knows that we don't want to use Osmux.
+			 */
+			if (!p->endp->cfg->osmux)
+				break;
+
+			if (strncmp("Osmux: ", line + 2, strlen("Osmux: ")) == 0)
+				osmux_cid = mgcp_osmux_setup(endp, line);
 			break;
 		case '\0':
 			have_sdp = 1;
@@ -783,7 +985,7 @@ mgcp_header_done:
 		if (tcfg->force_realloc) {
 			LOGP(DMGCP, LOGL_NOTICE, "Endpoint 0x%x already allocated. Forcing realloc.\n",
 			    ENDPOINT_NUMBER(endp));
-			mgcp_free_endp(endp);
+			mgcp_release_endp(endp);
 			if (p->cfg->realloc_cb)
 				p->cfg->realloc_cb(tcfg, ENDPOINT_NUMBER(endp));
 		} else {
@@ -821,14 +1023,33 @@ mgcp_header_done:
 	if (endp->ci == CI_UNUSED)
 		goto error2;
 
+	/* Annotate Osmux circuit ID and set it to activating state until this
+	 * is fully set up from the dummy load.
+	 */
+	endp->osmux.state = OSMUX_STATE_DISABLED;
+	if (osmux_cid >= 0) {
+		endp->osmux.cid = osmux_cid;
+		endp->osmux.state = OSMUX_STATE_ACTIVATING;
+	}
+
 	endp->allocated = 1;
 
 	/* set up RTP media parameters */
-	endp->bts_end.payload_type = tcfg->audio_payload;
+	set_audio_info(p->cfg, &endp->bts_end.codec, tcfg->audio_payload, tcfg->audio_name);
 	endp->bts_end.fmtp_extra = talloc_strdup(tcfg->endpoints,
 						tcfg->audio_fmtp_extra);
 	if (have_sdp)
 		parse_sdp_data(&endp->net_end, p);
+	else if (endp->local_options.codec)
+		set_audio_info(p->cfg, &endp->net_end.codec,
+			       PTYPE_UNDEFINED, endp->local_options.codec);
+
+	if (p->cfg->bts_force_ptime) {
+		endp->bts_end.packet_duration_ms = p->cfg->bts_force_ptime;
+		endp->bts_end.force_output_ptime = 1;
+	}
+
+	setup_rtp_processing(endp);
 
 	/* policy CB */
 	if (p->cfg->policy_cb) {
@@ -839,7 +1060,7 @@ mgcp_header_done:
 		case MGCP_POLICY_REJECT:
 			LOGP(DMGCP, LOGL_NOTICE, "CRCX rejected by policy on 0x%x\n",
 			     ENDPOINT_NUMBER(endp));
-			mgcp_free_endp(endp);
+			mgcp_release_endp(endp);
 			return create_err_response(endp, 400, "CRCX", p->trans);
 			break;
 		case MGCP_POLICY_DEFER:
@@ -859,13 +1080,14 @@ mgcp_header_done:
 	if (p->cfg->change_cb)
 		p->cfg->change_cb(tcfg, ENDPOINT_NUMBER(endp), MGCP_ENDP_CRCX);
 
-	if (endp->conn_mode & MGCP_CONN_RECV_ONLY && tcfg->keepalive_interval != 0)
-		mgcp_send_dummy(endp);
+	if (endp->conn_mode & MGCP_CONN_RECV_ONLY && tcfg->keepalive_interval != 0) {
+		send_dummy(endp);
+	}
 
 	create_transcoder(endp);
 	return create_response_with_sdp(endp, "CRCX", p->trans);
 error2:
-	mgcp_free_endp(endp);
+	mgcp_release_endp(endp);
 	LOGP(DMGCP, LOGL_NOTICE, "Resource error on 0x%x\n", ENDPOINT_NUMBER(endp));
 	return create_err_response(endp, error_code, "CRCX", p->trans);
 }
@@ -875,6 +1097,7 @@ static struct msgb *handle_modify_con(struct mgcp_parse_data *p)
 	struct mgcp_endpoint *endp = p->endp;
 	int error_code = 500;
 	int silent = 0;
+	int have_sdp = 0;
 	char *line;
 	const char *local_options = NULL;
 
@@ -888,6 +1111,9 @@ static struct msgb *handle_modify_con(struct mgcp_parse_data *p)
 	}
 
 	for_each_line(line, p->save) {
+		if (!mgcp_check_param(endp, line))
+			continue;
+
 		switch (line[0]) {
 		case 'C': {
 			if (verify_call_id(endp, line + 3) != 0)
@@ -914,6 +1140,7 @@ static struct msgb *handle_modify_con(struct mgcp_parse_data *p)
 			break;
 		case '\0':
 			/* SDP file begins */
+			have_sdp = 1;
 			parse_sdp_data(&endp->net_end, p);
 			/* This will exhaust p->save, so the loop will
 			 * terminate next time.
@@ -928,6 +1155,12 @@ static struct msgb *handle_modify_con(struct mgcp_parse_data *p)
 
 	set_local_cx_options(endp->tcfg->endpoints, &endp->local_options,
 			     local_options);
+
+	if (!have_sdp && endp->local_options.codec)
+		set_audio_info(p->cfg, &endp->net_end.codec,
+			       PTYPE_UNDEFINED, endp->local_options.codec);
+
+	setup_rtp_processing(endp);
 
 	/* policy CB */
 	if (p->cfg->policy_cb) {
@@ -963,7 +1196,7 @@ static struct msgb *handle_modify_con(struct mgcp_parse_data *p)
 
 	if (endp->conn_mode & MGCP_CONN_RECV_ONLY &&
 	    endp->tcfg->keepalive_interval != 0)
-		mgcp_send_dummy(endp);
+		send_dummy(endp);
 
 	if (silent)
 		goto out_silent;
@@ -996,6 +1229,9 @@ static struct msgb *handle_delete_con(struct mgcp_parse_data *p)
 	}
 
 	for_each_line(line, p->save) {
+		if (!mgcp_check_param(endp, line))
+			continue;
+
 		switch (line[0]) {
 		case 'C':
 			if (verify_call_id(endp, line + 3) != 0)
@@ -1047,7 +1283,7 @@ static struct msgb *handle_delete_con(struct mgcp_parse_data *p)
 	mgcp_format_stats(endp, stats, sizeof(stats));
 
 	delete_transcoder(endp);
-	mgcp_free_endp(endp);
+	mgcp_release_endp(endp);
 	if (p->cfg->change_cb)
 		p->cfg->change_cb(endp->tcfg, ENDPOINT_NUMBER(endp), MGCP_ENDP_DLCX);
 
@@ -1130,7 +1366,7 @@ static void mgcp_keepalive_timer_cb(void *_tcfg)
 	for (i = 1; i < tcfg->number_endpoints; ++i) {
 		struct mgcp_endpoint *endp = &tcfg->endpoints[i];
 		if (endp->conn_mode == MGCP_CONN_RECV_ONLY)
-			mgcp_send_dummy(endp);
+			send_dummy(endp);
 	}
 
 	LOGP(DMGCP, LOGL_DEBUG, "Rescheduling trunk %d keepalive timer.\n",
@@ -1168,6 +1404,11 @@ struct mgcp_config *mgcp_config_alloc(void)
 
 	cfg->bts_ports.base_port = RTP_PORT_DEFAULT;
 	cfg->net_ports.base_port = RTP_PORT_NET_DEFAULT;
+
+	cfg->rtp_processing_cb = &mgcp_rtp_processing_default;
+	cfg->setup_rtp_processing_cb = &mgcp_setup_rtp_processing_default;
+
+	cfg->get_net_downlink_format_cb = &mgcp_get_net_downlink_format_default;
 
 	/* default trunk handling */
 	cfg->trunk.cfg = cfg;
@@ -1218,6 +1459,19 @@ struct mgcp_trunk_config *mgcp_trunk_num(struct mgcp_config *cfg, int index)
 	return NULL;
 }
 
+static void mgcp_rtp_codec_reset(struct mgcp_rtp_codec *codec)
+{
+	codec->payload_type = -1;
+	talloc_free(codec->subtype_name);
+	codec->subtype_name = NULL;
+	talloc_free(codec->audio_name);
+	codec->audio_name = NULL;
+	codec->frame_duration_num = DEFAULT_RTP_AUDIO_FRAME_DUR_NUM;
+	codec->frame_duration_den = DEFAULT_RTP_AUDIO_FRAME_DUR_DEN;
+	codec->rate               = DEFAULT_RTP_AUDIO_DEFAULT_RATE;
+	codec->channels           = DEFAULT_RTP_AUDIO_DEFAULT_CHANNELS;
+}
+
 static void mgcp_rtp_end_reset(struct mgcp_rtp_end *end)
 {
 	if (end->local_alloc == PORT_ALLOC_DYNAMIC) {
@@ -1230,18 +1484,19 @@ static void mgcp_rtp_end_reset(struct mgcp_rtp_end *end)
 	end->dropped_packets = 0;
 	memset(&end->addr, 0, sizeof(end->addr));
 	end->rtp_port = end->rtcp_port = 0;
-	end->payload_type = -1;
 	end->local_alloc = -1;
 	talloc_free(end->fmtp_extra);
 	end->fmtp_extra = NULL;
+	talloc_free(end->rtp_process_data);
+	end->rtp_process_data = NULL;
 
 	/* Set default values */
-	end->frame_duration_num = DEFAULT_RTP_AUDIO_FRAME_DUR_NUM;
-	end->frame_duration_den = DEFAULT_RTP_AUDIO_FRAME_DUR_DEN;
 	end->frames_per_packet  = 0; /* unknown */
 	end->packet_duration_ms = DEFAULT_RTP_AUDIO_PACKET_DURATION_MS;
-	end->rate               = DEFAULT_RTP_AUDIO_DEFAULT_RATE;
 	end->output_enabled	= 0;
+
+	mgcp_rtp_codec_reset(&end->codec);
+	mgcp_rtp_codec_reset(&end->alt_codec);
 }
 
 static void mgcp_rtp_end_init(struct mgcp_rtp_end *end)
@@ -1275,9 +1530,9 @@ int mgcp_endpoints_allocate(struct mgcp_trunk_config *tcfg)
 	return 0;
 }
 
-void mgcp_free_endp(struct mgcp_endpoint *endp)
+void mgcp_release_endp(struct mgcp_endpoint *endp)
 {
-	LOGP(DMGCP, LOGL_DEBUG, "Deleting endpoint on: 0x%x\n", ENDPOINT_NUMBER(endp));
+	LOGP(DMGCP, LOGL_DEBUG, "Releasing endpoint on: 0x%x\n", ENDPOINT_NUMBER(endp));
 	endp->ci = CI_UNUSED;
 	endp->allocated = 0;
 
@@ -1286,6 +1541,8 @@ void mgcp_free_endp(struct mgcp_endpoint *endp)
 
 	talloc_free(endp->local_options.string);
 	endp->local_options.string = NULL;
+	talloc_free(endp->local_options.codec);
+	endp->local_options.codec = NULL;
 
 	mgcp_rtp_end_reset(&endp->bts_end);
 	mgcp_rtp_end_reset(&endp->net_end);
@@ -1298,7 +1555,15 @@ void mgcp_free_endp(struct mgcp_endpoint *endp)
 
 	endp->conn_mode = endp->orig_mode = MGCP_CONN_NONE;
 
+	if (endp->osmux.state == OSMUX_STATE_ENABLED)
+		osmux_disable_endpoint(endp);
+
 	memset(&endp->taps, 0, sizeof(endp->taps));
+}
+
+void mgcp_initialize_endp(struct mgcp_endpoint *endp)
+{
+	return mgcp_release_endp(endp);
 }
 
 static int send_trans(struct mgcp_config *cfg, const char *buf, int len)
@@ -1318,22 +1583,25 @@ static void send_msg(struct mgcp_endpoint *endp, int endpoint, int port,
 {
 	char buf[2096];
 	int len;
+	int nchars;
 
 	/* hardcoded to AMR right now, we do not know the real type at this point */
 	len = snprintf(buf, sizeof(buf),
 			"%s 42 %x@mgw MGCP 1.0\r\n"
 			"C: 4256\r\n"
 			"M: %s\r\n"
-			"\r\n"
-			"c=IN IP4 %s\r\n"
-			"m=audio %d RTP/AVP %d\r\n"
-			"a=rtpmap:%d %s\r\n",
-			msg, endpoint, mode, endp->cfg->source_addr,
-			port, endp->tcfg->audio_payload,
-			endp->tcfg->audio_payload, endp->tcfg->audio_name);
+			"\r\n",
+			msg, endpoint, mode);
 
 	if (len < 0)
 		return;
+
+	nchars = write_response_sdp(endp, buf + len, sizeof(buf) + len - 1,
+				    endp->cfg->source_addr);
+	if (nchars < 0)
+		return;
+
+	len += nchars;
 
 	buf[sizeof(buf) - 1] = '\0';
 
@@ -1386,6 +1654,27 @@ int mgcp_send_reset_ep(struct mgcp_endpoint *endp, int endpoint)
 	buf[sizeof(buf) - 1] = '\0';
 
 	return send_agent(endp->cfg, buf, len);
+}
+
+static void setup_rtp_processing(struct mgcp_endpoint *endp)
+{
+	struct mgcp_config *cfg = endp->cfg;
+
+	if (endp->type != MGCP_RTP_DEFAULT)
+		return;
+
+	if (endp->conn_mode == MGCP_CONN_LOOPBACK)
+		return;
+
+	if (endp->conn_mode & MGCP_CONN_SEND_ONLY)
+		cfg->setup_rtp_processing_cb(endp, &endp->net_end, &endp->bts_end);
+	else
+		cfg->setup_rtp_processing_cb(endp, &endp->net_end, NULL);
+
+	if (endp->conn_mode & MGCP_CONN_RECV_ONLY)
+		cfg->setup_rtp_processing_cb(endp, &endp->bts_end, &endp->net_end);
+	else
+		cfg->setup_rtp_processing_cb(endp, &endp->bts_end, NULL);
 }
 
 static void create_transcoder(struct mgcp_endpoint *endp)

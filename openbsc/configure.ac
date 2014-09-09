@@ -1,7 +1,7 @@
 dnl Process this file with autoconf to produce a configure script
 AC_INIT([openbsc],
 	m4_esyscmd([./git-version-gen .tarball-version]),
-	[openbsc-devel@lists.openbsc.org])
+	[openbsc@lists.osmocom.org])
 
 AM_INIT_AUTOMAKE([dist-bzip2])
 AC_CONFIG_TESTDIR(tests)
@@ -25,9 +25,11 @@ AC_SUBST(LIBRARY_DL)
 PKG_CHECK_MODULES(LIBCURL, libcurl)
 PKG_CHECK_MODULES(LIBOSMOCORE, libosmocore >= 0.6.4)
 PKG_CHECK_MODULES(LIBOSMOVTY, libosmovty >= 0.3.0)
-PKG_CHECK_MODULES(LIBOSMOGSM, libosmogsm >= 0.6.0)
+PKG_CHECK_MODULES(LIBOSMOCTRL, libosmoctrl)
+PKG_CHECK_MODULES(LIBOSMOGSM, libosmogsm >= 0.7.0)
 PKG_CHECK_MODULES(LIBOSMOABIS, libosmoabis >= 0.2.0)
 PKG_CHECK_MODULES(LIBOSMOGB, libosmogb >= 0.6.4)
+PKG_CHECK_MODULES(LIBOSMONETIF, libosmo-netif >= 0.0.1)
 
 # Enabke/disable the NAT?
 AC_ARG_ENABLE([nat], [AS_HELP_STRING([--enable-nat], [Build the BSC NAT. Requires SCCP])],
@@ -56,6 +58,21 @@ if test "$osmo_ac_build_smpp" = "yes" ; then
 fi
 AM_CONDITIONAL(BUILD_SMPP, test "x$osmo_ac_build_smpp" = "xyes")
 AC_SUBST(osmo_ac_build_smpp)
+
+# Enable/disable transcoding within osmo-bsc_mgcp?
+AC_ARG_ENABLE([mgcp-transcoding], [AS_HELP_STRING([--enable-mgcp-transcoding], [Build the MGCP gateway with internal transcoding enabled.])],
+    [osmo_ac_mgcp_transcoding="$enableval"],[osmo_ac_mgcp_transcoding="no"])
+AC_ARG_WITH([g729], [AS_HELP_STRING([--with-g729], [Enable G.729 encoding/decoding.])], [osmo_ac_with_g729="$withval"],[osmo_ac_with_g729="no"])
+
+if test "$osmo_ac_mgcp_transcoding" = "yes" ; then
+    AC_SEARCH_LIBS(gsm_create, gsm)
+    if test "$osmo_ac_with_g729" = "yes" ; then
+	PKG_CHECK_MODULES(LIBBCG729, libbcg729 >= 0.1, [AC_DEFINE([HAVE_BCG729], [1], [Use bgc729 decoder/encoder])])
+    fi
+    AC_DEFINE(BUILD_MGCP_TRANSCODING, 1, [Define if we want to build the MGCP gateway with transcoding support])
+fi
+AM_CONDITIONAL(BUILD_MGCP_TRANSCODING, test "x$osmo_ac_mgcp_transcoding" = "xyes")
+AC_SUBST(osmo_ac_mgcp_transcoding)
 
 
 found_libgtp=yes
@@ -122,18 +139,23 @@ CHECK_TM_INCLUDES_TM_GMTOFF
 
 AC_ARG_ENABLE([vty_tests],
 		AC_HELP_STRING([--enable-vty-tests],
-				[Include the VTY tests in make check [default=no]]),
-		[enable_vty_tests="$enableval"],[enable_vty_tests="no"])
-if test "x$enable_vty_tests" = "xyes" ; then
+				[Include the VTY/CTRL tests in make check (deprecated)
+				[default=no]]),
+		[enable_ext_tests="$enableval"],[enable_ext_tests="no"])
+AC_ARG_ENABLE([external_tests],
+		AC_HELP_STRING([--enable-external-tests],
+				[Include the VTY/CTRL tests in make check [default=no]]),
+		[enable_ext_tests="$enableval"],[enable_ext_tests="no"])
+if test "x$enable_ext_tests" = "xyes" ; then
 	AM_PATH_PYTHON
-	AC_CHECK_PROG(OSMOTESTVTY_CHECK,osmotestvty.py,yes)
-	 if test "x$OSMOTESTVTY_CHECK" != "xyes" ; then
-		AC_MSG_ERROR([Please install osmocom-python to run the vty tests.])
+	AC_CHECK_PROG(OSMOTESTEXT_CHECK,osmotestvty.py,yes)
+	 if test "x$OSMOTESTEXT_CHECK" != "xyes" ; then
+		AC_MSG_ERROR([Please install osmocom-python to run the VTY/CTRL tests.])
 	fi
 fi
-AC_MSG_CHECKING([whether to enable VTY tests])
-AC_MSG_RESULT([$enable_vty_tests])
-AM_CONDITIONAL(ENABLE_VTY_TESTS, test "x$enable_vty_tests" = "xyes")
+AC_MSG_CHECKING([whether to enable VTY/CTRL tests])
+AC_MSG_RESULT([$enable_ext_tests])
+AM_CONDITIONAL(ENABLE_EXT_TESTS, test "x$enable_ext_tests" = "xyes")
 
 dnl Generate the output
 AM_CONFIG_HEADER(bscconfig.h)
@@ -145,7 +167,6 @@ AC_OUTPUT(
     src/Makefile
     src/libtrau/Makefile
     src/libbsc/Makefile
-    src/libctrl/Makefile
     src/libmsc/Makefile
     src/libmgcp/Makefile
     src/libcommon/Makefile

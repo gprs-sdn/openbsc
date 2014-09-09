@@ -34,63 +34,22 @@
 
 #include <openbsc/mgcp.h>
 #include <openbsc/mgcp_internal.h>
+#include <openbsc/rtp.h>
+
+#include <openbsc/osmux.h>
 
 #warning "Make use of the rtp proxy code"
 
-/* attempt to determine byte order */
-#include <sys/param.h>
-#include <limits.h>
-#include <time.h>
-
-#ifndef __BYTE_ORDER
-# ifdef __APPLE__
-#  define __BYTE_ORDER __DARWIN_BYTE_ORDER
-#  define __LITTLE_ENDIAN __DARWIN_LITTLE_ENDIAN
-#  define __BIG_ENDIAN __DARWIN_BIG_ENDIAN
-# else
-#  error "__BYTE_ORDER should be defined by someone"
-# endif
-#endif
-
-/* according to rtp_proxy.c RFC 3550 */
-struct rtp_hdr {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-	uint8_t  csrc_count:4,
-		  extension:1,
-		  padding:1,
-		  version:2;
-	uint8_t  payload_type:7,
-		  marker:1;
-#elif __BYTE_ORDER == __BIG_ENDIAN
-	uint8_t  version:2,
-		  padding:1,
-		  extension:1,
-		  csrc_count:4;
-	uint8_t  marker:1,
-		  payload_type:7;
-#endif
-	uint16_t sequence;
-	uint32_t timestamp;
-	uint32_t ssrc;
-} __attribute__((packed));
 
 #define RTP_SEQ_MOD		(1 << 16)
 #define RTP_MAX_DROPOUT		3000
 #define RTP_MAX_MISORDER	100
-
-
-enum {
-	MGCP_DEST_NET = 0,
-	MGCP_DEST_BTS,
-};
+#define RTP_BUF_SIZE		4096
 
 enum {
 	MGCP_PROTO_RTP,
 	MGCP_PROTO_RTCP,
 };
-
-#define MGCP_DUMMY_LOAD 0x23
-
 
 /**
  * This does not need to be a precision timestamp and
@@ -118,8 +77,7 @@ static uint32_t get_current_ts(unsigned unit)
 	return ret;
 }
 
-static int mgcp_udp_send(int fd, struct in_addr *addr, int port, char *buf,
-			 int len)
+int mgcp_udp_send(int fd, struct in_addr *addr, int port, char *buf, int len)
 {
 	struct sockaddr_in out;
 	out.sin_family = AF_INET;
@@ -247,14 +205,14 @@ static int check_rtp_timestamp(struct mgcp_endpoint *endp,
 		     "The %s timestamp has an alignment error of %d "
 		     "on 0x%x SSRC: %u "
 		     "SeqNo delta: %d, TS delta: %d, dTS/dSeq: %d "
-		     "from %s:%d in %d\n",
+		     "from %s:%d in mode %d. ptime: %d\n",
 		     text, timestamp_error,
 		     ENDPOINT_NUMBER(endp), sstate->ssrc,
 		     (int16_t)(seq - sstate->last_seq),
 		     (int32_t)(timestamp - sstate->last_timestamp),
 		     tsdelta,
 		     inet_ntoa(addr->sin_addr), ntohs(addr->sin_port),
-		     endp->conn_mode);
+		     endp->conn_mode, state->packet_duration);
 	}
 	return 1;
 }
@@ -281,7 +239,7 @@ static int adjust_rtp_timestamp_offset(struct mgcp_endpoint *endp,
 			     inet_ntoa(addr->sin_addr), ntohs(addr->sin_port),
 			     endp->conn_mode);
 		} else {
-			tsdelta = rtp_end->rate * 20 / 1000;
+			tsdelta = rtp_end->codec.rate * 20 / 1000;
 			LOGP(DMGCP, LOGL_NOTICE,
 			     "Fixed packet duration and last timestamp delta "
 			     "are not available on 0x%x, "
@@ -347,6 +305,31 @@ static int align_rtp_timestamp_offset(struct mgcp_endpoint *endp,
 	return timestamp_error;
 }
 
+int mgcp_rtp_processing_default(struct mgcp_endpoint *endp, struct mgcp_rtp_end *dst_end,
+				char *data, int *len, int buf_size)
+{
+	return 0;
+}
+
+int mgcp_setup_rtp_processing_default(struct mgcp_endpoint *endp,
+				      struct mgcp_rtp_end *dst_end,
+				      struct mgcp_rtp_end *src_end)
+{
+	return 0;
+}
+
+void mgcp_get_net_downlink_format_default(struct mgcp_endpoint *endp,
+					  int *payload_type,
+					  const char**audio_name,
+					  const char**fmtp_extra)
+{
+	/* Use the BTS side parameters when passing the SDP data (for
+	 * downlink) to the net peer.
+	 */
+	*payload_type = endp->bts_end.codec.payload_type;
+	*audio_name = endp->bts_end.codec.audio_name;
+	*fmtp_extra = endp->bts_end.fmtp_extra;
+}
 
 /**
  * The RFC 3550 Appendix A assumes there are multiple sources but
@@ -365,7 +348,7 @@ void mgcp_patch_and_count(struct mgcp_endpoint *endp, struct mgcp_rtp_state *sta
 	uint16_t seq, udelta;
 	uint32_t timestamp, ssrc;
 	struct rtp_hdr *rtp_hdr;
-	int payload = rtp_end->payload_type;
+	int payload = rtp_end->codec.payload_type;
 
 	if (len < sizeof(*rtp_hdr))
 		return;
@@ -373,7 +356,7 @@ void mgcp_patch_and_count(struct mgcp_endpoint *endp, struct mgcp_rtp_state *sta
 	rtp_hdr = (struct rtp_hdr *) data;
 	seq = ntohs(rtp_hdr->sequence);
 	timestamp = ntohl(rtp_hdr->timestamp);
-	arrival_time = get_current_ts(rtp_end->rate);
+	arrival_time = get_current_ts(rtp_end->codec.rate);
 	ssrc = ntohl(rtp_hdr->ssrc);
 	transit = arrival_time - timestamp;
 
@@ -397,7 +380,7 @@ void mgcp_patch_and_count(struct mgcp_endpoint *endp, struct mgcp_rtp_state *sta
 			inet_ntoa(addr->sin_addr), ntohs(addr->sin_port),
 			endp->conn_mode);
 		if (state->packet_duration == 0) {
-			state->packet_duration = rtp_end->rate * 20 / 1000;
+			state->packet_duration = rtp_end->codec.rate * 20 / 1000;
 			LOGP(DMGCP, LOGL_NOTICE,
 			     "Fixed packet duration is not available on 0x%x, "
 			     "using fixed 20ms instead: %d from %s:%d in %d\n",
@@ -567,8 +550,8 @@ static int mgcp_send_transcoder(struct mgcp_rtp_end *end,
 	return rc;
 }
 
-static int mgcp_send(struct mgcp_endpoint *endp, int dest, int is_rtp,
-		     struct sockaddr_in *addr, char *buf, int rc)
+int mgcp_send(struct mgcp_endpoint *endp, int dest, int is_rtp,
+	      struct sockaddr_in *addr, char *buf, int rc)
 {
 	struct mgcp_trunk_config *tcfg = endp->tcfg;
 	struct mgcp_rtp_end *rtp_end;
@@ -596,11 +579,28 @@ static int mgcp_send(struct mgcp_endpoint *endp, int dest, int is_rtp,
 	if (!rtp_end->output_enabled)
 		rtp_end->dropped_packets += 1;
 	else if (is_rtp) {
-		mgcp_patch_and_count(endp, rtp_state, rtp_end, addr, buf, rc);
-		forward_data(rtp_end->rtp.fd, &endp->taps[tap_idx], buf, rc);
-		return mgcp_udp_send(rtp_end->rtp.fd,
-				     &rtp_end->addr,
-				     rtp_end->rtp_port, buf, rc);
+		int cont;
+		int nbytes = 0;
+		int len = rc;
+		do {
+			cont = endp->cfg->rtp_processing_cb(endp, rtp_end,
+							buf, &len, RTP_BUF_SIZE);
+			if (cont < 0)
+				break;
+
+			mgcp_patch_and_count(endp, rtp_state, rtp_end, addr, buf, len);
+			forward_data(rtp_end->rtp.fd, &endp->taps[tap_idx],
+				     buf, len);
+			rc = mgcp_udp_send(rtp_end->rtp.fd,
+					   &rtp_end->addr,
+					   rtp_end->rtp_port, buf, len);
+
+			if (rc <= 0)
+				return rc;
+			nbytes += rc;
+			len = cont;
+		} while (len > 0);
+		return nbytes;
 	} else if (!tcfg->omit_rtcp) {
 		return mgcp_udp_send(rtp_end->rtcp.fd,
 				     &rtp_end->addr,
@@ -635,7 +635,7 @@ static int receive_from(struct mgcp_endpoint *endp, int fd, struct sockaddr_in *
 
 static int rtp_data_net(struct osmo_fd *fd, unsigned int what)
 {
-	char buf[4096];
+	char buf[RTP_BUF_SIZE];
 	struct sockaddr_in addr;
 	struct mgcp_endpoint *endp;
 	int rc, proto;
@@ -655,12 +655,20 @@ static int rtp_data_net(struct osmo_fd *fd, unsigned int what)
 		return -1;
 	}
 
-	if (endp->net_end.rtp_port != addr.sin_port &&
-	    endp->net_end.rtcp_port != addr.sin_port) {
-		LOGP(DMGCP, LOGL_ERROR,
-			"Data from wrong source port %d on 0x%x\n",
-			ntohs(addr.sin_port), ENDPOINT_NUMBER(endp));
-		return -1;
+	switch(endp->type) {
+	case MGCP_RTP_DEFAULT:
+	case MGCP_RTP_TRANSCODED:
+		if (endp->net_end.rtp_port != addr.sin_port &&
+		    endp->net_end.rtcp_port != addr.sin_port) {
+			LOGP(DMGCP, LOGL_ERROR,
+				"Data from wrong source port %d on 0x%x\n",
+				ntohs(addr.sin_port), ENDPOINT_NUMBER(endp));
+			return -1;
+		}
+		break;
+	case MGCP_OSMUX_BSC:
+	case MGCP_OSMUX_BSC_NAT:
+		break;
 	}
 
 	/* throw away the dummy message */
@@ -683,6 +691,10 @@ static int rtp_data_net(struct osmo_fd *fd, unsigned int what)
 	case MGCP_RTP_TRANSCODED:
 		return mgcp_send_transcoder(&endp->trans_net, endp->cfg,
 					    proto == MGCP_PROTO_RTP, buf, rc);
+	case MGCP_OSMUX_BSC_NAT:
+		return osmux_xfrm_to_osmux(MGCP_DEST_BTS, buf, rc, endp);
+	case MGCP_OSMUX_BSC:	/* Should not happen */
+		break;
 	}
 
 	LOGP(DMGCP, LOGL_ERROR, "Bad MGCP type %u on endpoint %u\n",
@@ -719,7 +731,7 @@ static void discover_bts(struct mgcp_endpoint *endp, int proto, struct sockaddr_
 
 static int rtp_data_bts(struct osmo_fd *fd, unsigned int what)
 {
-	char buf[4096];
+	char buf[RTP_BUF_SIZE];
 	struct sockaddr_in addr;
 	struct mgcp_endpoint *endp;
 	int rc, proto;
@@ -771,6 +783,11 @@ static int rtp_data_bts(struct osmo_fd *fd, unsigned int what)
 	case MGCP_RTP_TRANSCODED:
 		return mgcp_send_transcoder(&endp->trans_bts, endp->cfg,
 					    proto == MGCP_PROTO_RTP, buf, rc);
+	case MGCP_OSMUX_BSC:
+		/* OSMUX translation: BTS -> BSC */
+		return osmux_xfrm_to_osmux(MGCP_DEST_NET, buf, rc, endp);
+	case MGCP_OSMUX_BSC_NAT:
+		break;	/* Should not happen */
 	}
 
 	LOGP(DMGCP, LOGL_ERROR, "Bad MGCP type %u on endpoint %u\n",
@@ -781,7 +798,7 @@ static int rtp_data_bts(struct osmo_fd *fd, unsigned int what)
 static int rtp_data_transcoder(struct mgcp_rtp_end *end, struct mgcp_endpoint *_endp,
 			      int dest, struct osmo_fd *fd)
 {
-	char buf[4096];
+	char buf[RTP_BUF_SIZE];
 	struct sockaddr_in addr;
 	struct mgcp_config *cfg;
 	int rc, proto;
@@ -835,8 +852,7 @@ static int rtp_data_trans_bts(struct osmo_fd *fd, unsigned int what)
 	return rtp_data_transcoder(&endp->trans_bts, endp, MGCP_DEST_BTS, fd);
 }
 
-static int mgcp_create_bind(const char *source_addr, struct osmo_fd *fd,
-			    int port)
+int mgcp_create_bind(const char *source_addr, struct osmo_fd *fd, int port)
 {
 	struct sockaddr_in addr;
 	int on = 1;

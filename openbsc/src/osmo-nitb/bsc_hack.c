@@ -46,7 +46,9 @@
 #include <openbsc/token_auth.h>
 #include <openbsc/handover_decision.h>
 #include <openbsc/rrlp.h>
-#include <openbsc/control_if.h>
+#include <osmocom/ctrl/control_if.h>
+#include <osmocom/ctrl/ports.h>
+#include <openbsc/ctrl.h>
 #include <openbsc/osmo_bsc_rf.h>
 
 #include "../../bscconfig.h"
@@ -148,10 +150,10 @@ static void handle_options(int argc, char **argv)
 			daemonize = 1;
 			break;
 		case 'l':
-			database_name = strdup(optarg);
+			database_name = optarg;
 			break;
 		case 'c':
-			config_file = strdup(optarg);
+			config_file = optarg;
 			break;
 		case 'p':
 			create_pcap_file(optarg);
@@ -284,7 +286,7 @@ int main(int argc, char **argv)
 #endif
 	bsc_api_init(bsc_gsmnet, msc_bsc_api());
 
-	bsc_gsmnet->ctrl = bsc_controlif_setup(bsc_gsmnet, 4249);
+	bsc_gsmnet->ctrl = bsc_controlif_setup(bsc_gsmnet, OSMO_CTRL_PORT_NITB_BSC);
 	if (!bsc_gsmnet->ctrl) {
 		printf("Failed to initialize control interface. Exiting.\n");
 		return -1;

@@ -13,6 +13,7 @@
 #include <osmocom/gsm/tlv.h>
 #include <osmocom/gsm/rxlev_stat.h>
 #include <osmocom/gsm/sysinfo.h>
+#include <osmocom/gsm/meas_rep.h>
 
 #include <osmocom/gsm/protocol/gsm_08_58.h>
 #include <osmocom/gsm/protocol/gsm_12_21.h>
@@ -56,9 +57,6 @@ enum gsm_chreq_reason_t {
 #define HARDCODED_BTS0_TS	1
 #define HARDCODED_BTS1_TS	6
 #define HARDCODED_BTS2_TS	11
-
-/* reserved according to GSM 03.03 § 2.4 */
-#define GSM_RESERVED_TMSI   0xFFFFFFFF
 
 enum gsm_hooks {
 	GSM_HOOK_NM_SWLOAD,
@@ -278,12 +276,7 @@ struct gsm_lchan {
 		struct bts_ul_meas uplink[MAX_NUM_UL_MEAS];
 		/* last L1 header from the MS */
 		uint8_t l1_info[2];
-		struct {
-			uint8_t rxlev_full;
-			uint8_t rxlev_sub;
-			uint8_t rxqual_full;
-			uint8_t rxqual_sub;
-		} res;
+		struct gsm_meas_rep_unidir ul_res;
 	} meas;
 	struct {
 		struct amr_multirate_conf amr_mr;
@@ -291,9 +284,11 @@ struct gsm_lchan {
 			uint8_t buf[16];
 			uint8_t len;
 		} last_sid;
+		uint8_t last_cmr;
 	} tch;
 	/* BTS-side ciphering state (rx only, bi-directional, ...) */
 	uint8_t ciph_state;
+	uint8_t ciph_ns;
 	uint8_t loopback;
 	struct {
 		uint8_t active;
@@ -372,9 +367,23 @@ struct gsm_bts_trx {
 	int nominal_power;		/* in dBm */
 	unsigned int max_power_red;	/* in actual dB */
 
+#ifndef ROLE_BSC
+	struct trx_power_params power_params;
+	struct {
+		unsigned int max_initial_power;	/* in dBm */
+		uint8_t	step_size;		/* in dB  */
+		int step_interval;		/* in seconds */
+		struct osmo_timer_list step_timer;
+
+		int current_power;		/* in dBm */
+	} pa;
+
+	unsigned int power_reduce;	/* in dB */
+
 	struct {
 		void *l1h;
 	} role_bts;
+#endif
 
 	union {
 		struct {
@@ -726,8 +735,9 @@ struct gsm_bts {
 
 
 struct gsm_bts *gsm_bts_alloc(void *talloc_ctx);
-struct gsm_bts_trx *gsm_bts_trx_alloc(struct gsm_bts *bts);
+struct gsm_bts *gsm_bts_num(struct gsm_network *net, int num);
 
+struct gsm_bts_trx *gsm_bts_trx_alloc(struct gsm_bts *bts);
 struct gsm_bts_trx *gsm_bts_trx_num(const struct gsm_bts *bts, int num);
 
 

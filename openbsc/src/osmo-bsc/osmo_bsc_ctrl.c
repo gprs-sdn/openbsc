@@ -18,13 +18,14 @@
  *
  */
 
-#include <openbsc/control_cmd.h>
+#include <osmocom/ctrl/control_cmd.h>
 #include <openbsc/debug.h>
 #include <openbsc/gsm_data.h>
 #include <openbsc/osmo_bsc.h>
 #include <openbsc/osmo_bsc_rf.h>
 #include <openbsc/osmo_msc_data.h>
 #include <openbsc/signal.h>
+#include <openbsc/gsm_04_80.h>
 
 #include <osmocom/core/linuxlist.h>
 #include <osmocom/core/signal.h>
@@ -58,7 +59,7 @@ void osmo_bsc_send_trap(struct ctrl_cmd *cmd, struct bsc_msc_connection *msc_con
 	talloc_free(trap);
 }
 
-CTRL_CMD_DEFINE(msc_connection_status, "msc_connection_status");
+CTRL_CMD_DEFINE_RO(msc_connection_status, "msc_connection_status");
 static int msc_connection_status = 0;
 
 static int get_msc_connection_status(struct ctrl_cmd *cmd, void *data)
@@ -68,17 +69,6 @@ static int get_msc_connection_status(struct ctrl_cmd *cmd, void *data)
 	else
 		cmd->reply = "disconnected";
 	return CTRL_CMD_REPLY;
-}
-
-static int set_msc_connection_status(struct ctrl_cmd *cmd, void *data)
-{
-	return CTRL_CMD_ERROR;
-}
-
-static int verify_msc_connection_status(struct ctrl_cmd *cmd, const char *value, void *data)
-{
-	cmd->reply = "Read-only property";
-	return 1;
 }
 
 static int msc_connection_status_trap_cb(unsigned int subsys, unsigned int signal, void *handler_data, void *signal_data)
@@ -114,7 +104,7 @@ static int msc_connection_status_trap_cb(unsigned int subsys, unsigned int signa
 	return 0;
 }
 
-CTRL_CMD_DEFINE(bts_connection_status, "bts_connection_status");
+CTRL_CMD_DEFINE_RO(bts_connection_status, "bts_connection_status");
 static int bts_connection_status = 0;
 
 static int get_bts_connection_status(struct ctrl_cmd *cmd, void *data)
@@ -124,17 +114,6 @@ static int get_bts_connection_status(struct ctrl_cmd *cmd, void *data)
 	else
 		cmd->reply = "disconnected";
 	return CTRL_CMD_REPLY;
-}
-
-static int set_bts_connection_status(struct ctrl_cmd *cmd, void *data)
-{
-	return CTRL_CMD_ERROR;
-}
-
-static int verify_bts_connection_status(struct ctrl_cmd *cmd, const char *value, void *data)
-{
-	cmd->reply = "Read-only property";
-	return 1;
 }
 
 static int bts_connection_status_trap_cb(unsigned int subsys, unsigned int signal, void *handler_data, void *signal_data)
@@ -496,7 +475,7 @@ err:
 	return 1;
 }
 
-CTRL_CMD_DEFINE(bts_rf_state, "rf_state");
+CTRL_CMD_DEFINE_RO(bts_rf_state, "rf_state");
 static int get_bts_rf_state(struct ctrl_cmd *cmd, void *data)
 {
 	const char *oper, *admin, *policy;
@@ -520,16 +499,6 @@ static int get_bts_rf_state(struct ctrl_cmd *cmd, void *data)
 	return CTRL_CMD_REPLY;
 }
 
-static int set_bts_rf_state(struct ctrl_cmd *cmd, void *data)
-{
-	cmd->reply = "set is unimplemented";
-	return CTRL_CMD_ERROR;
-}
-
-static int verify_bts_rf_state(struct ctrl_cmd *cmd, const char *value, void *data)
-{
-	return 0;
-}
 
 CTRL_CMD_DEFINE(net_rf_lock, "rf_locked");
 static int get_net_rf_lock(struct ctrl_cmd *cmd, void *data)
@@ -584,6 +553,157 @@ static int verify_net_rf_lock(struct ctrl_cmd *cmd, const char *value, void *dat
 	return 0;
 }
 
+CTRL_CMD_DEFINE(net_notification, "notification");
+static int get_net_notification(struct ctrl_cmd *cmd, void *data)
+{
+	cmd->reply = "There is nothing to read";
+	return CTRL_CMD_ERROR;
+}
+
+static int set_net_notification(struct ctrl_cmd *cmd, void *data)
+{
+	struct ctrl_cmd *trap;
+	struct gsm_network *net;
+
+	net = cmd->node;
+
+	trap = ctrl_cmd_create(tall_bsc_ctx, CTRL_TYPE_TRAP);
+	if (!trap) {
+		LOGP(DCTRL, LOGL_ERROR, "Trap creation failed\n");
+		goto handled;
+	}
+
+	trap->id = "0";
+	trap->variable = "notification";
+	trap->reply = talloc_strdup(trap, cmd->value);
+
+	/*
+	 * This should only be sent to local systems. In the future
+	 * we might even ask for systems to register to receive
+	 * the notifications.
+	 */
+	ctrl_cmd_send_to_all(net->ctrl, trap);
+	talloc_free(trap);
+
+handled:
+	return CTRL_CMD_HANDLED;
+}
+
+static int verify_net_notification(struct ctrl_cmd *cmd, const char *value, void *data)
+{
+	return 0;
+}
+
+CTRL_CMD_DEFINE(net_inform_msc, "inform-msc-v1");
+static int get_net_inform_msc(struct ctrl_cmd *cmd, void *data)
+{
+	cmd->reply = "There is nothing to read";
+	return CTRL_CMD_ERROR;
+}
+
+static int set_net_inform_msc(struct ctrl_cmd *cmd, void *data)
+{
+	struct gsm_network *net;
+	struct osmo_msc_data *msc;
+
+	net = cmd->node;
+	llist_for_each_entry(msc, &net->bsc_data->mscs, entry) {
+		struct ctrl_cmd *trap;
+
+		trap = ctrl_cmd_create(tall_bsc_ctx, CTRL_TYPE_TRAP);
+		if (!trap) {
+			LOGP(DCTRL, LOGL_ERROR, "Trap creation failed\n");
+			continue;
+		}
+
+		trap->id = "0";
+		trap->variable = "inform-msc-v1";
+		trap->reply = talloc_strdup(trap, cmd->value);
+		ctrl_cmd_send(&msc->msc_con->write_queue, trap);
+		talloc_free(trap);
+	}
+
+
+	return CTRL_CMD_HANDLED;
+}
+
+static int verify_net_inform_msc(struct ctrl_cmd *cmd, const char *value, void *data)
+{
+	return 0;
+}
+
+CTRL_CMD_DEFINE(net_ussd_notify, "ussd-notify-v1");
+static int get_net_ussd_notify(struct ctrl_cmd *cmd, void *data)
+{
+	cmd->reply = "There is nothing to read";
+	return CTRL_CMD_ERROR;
+}
+
+static int set_net_ussd_notify(struct ctrl_cmd *cmd, void *data)
+{
+	struct gsm_subscriber_connection *conn;
+	struct gsm_network *net;
+	char *saveptr = NULL;
+	char *cic_str, *alert_str, *text_str;
+	int cic, alert;
+
+	/* Verify has done the test for us */
+	cic_str = strtok_r(cmd->value, ",", &saveptr);
+	alert_str = strtok_r(NULL, ",", &saveptr);
+	text_str = strtok_r(NULL, ",", &saveptr);
+
+	if (!cic_str || !alert_str || !text_str) {
+		cmd->reply = "Programming issue. How did this pass verify?";
+		return CTRL_CMD_ERROR;
+	}
+
+	cmd->reply = "No connection found";
+
+	cic = atoi(cic_str);
+	alert = atoi(alert_str);
+
+	net = cmd->node;
+	llist_for_each_entry(conn, bsc_api_sub_connections(net), entry) {
+		if (!conn->sccp_con)
+			continue;
+
+		if (conn->sccp_con->cic != cic)
+			continue;
+
+		/*
+		 * This is a hack. My E71 does not like to immediately
+		 * receive a release complete on a TCH. So schedule a
+		 * release complete to clear any previous attempt. The
+		 * right thing would be to track invokeId and only send
+		 * the release complete when we get a returnResultLast
+		 * for this invoke id.
+		 */
+		gsm0480_send_releaseComplete(conn);
+		gsm0480_send_ussdNotify(conn, alert, text_str);
+		cmd->reply = "Found a connection";
+		break;
+	}
+
+	return CTRL_CMD_REPLY;
+}
+
+static int verify_net_ussd_notify(struct ctrl_cmd *cmd, const char *value, void *data)
+{
+	char *saveptr = NULL;
+	char *inp, *cic, *alert, *text;
+
+	inp = talloc_strdup(cmd, value);
+
+	cic = strtok_r(inp, ",", &saveptr);
+	alert = strtok_r(NULL, ",", &saveptr);
+	text = strtok_r(NULL, ",", &saveptr);
+
+	talloc_free(inp);
+	if (!cic || !alert || !text)
+		return 1;
+	return 0;
+}
+
 static int msc_signal_handler(unsigned int subsys, unsigned int signal,
 			void *handler_data, void *signal_data)
 {
@@ -634,6 +754,15 @@ int bsc_ctrl_cmds_install(struct gsm_network *net)
 	if (rc)
 		goto end;
 	rc = ctrl_cmd_install(CTRL_NODE_ROOT, &cmd_bts_connection_status);
+	if (rc)
+		goto end;
+	rc = ctrl_cmd_install(CTRL_NODE_ROOT, &cmd_net_notification);
+	if (rc)
+		goto end;
+	rc = ctrl_cmd_install(CTRL_NODE_ROOT, &cmd_net_inform_msc);
+	if (rc)
+		goto end;
+	rc = ctrl_cmd_install(CTRL_NODE_ROOT, &cmd_net_ussd_notify);
 	if (rc)
 		goto end;
 	rc = osmo_signal_register_handler(SS_L_INPUT, &bts_connection_status_trap_cb, net);

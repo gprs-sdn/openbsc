@@ -44,10 +44,14 @@
 
 #include <osmocom/vty/telnet_interface.h>
 #include <osmocom/vty/logging.h>
-
+#include <osmocom/vty/ports.h>
 #include <osmocom/vty/command.h>
 
 #include "../../bscconfig.h"
+
+#ifdef BUILD_MGCP_TRANSCODING
+#include "openbsc/mgcp_transcode.h"
+#endif
 
 /* this is here for the vty... it will never be called */
 void subscr_put() { abort(); }
@@ -177,7 +181,7 @@ static int read_call_agent(struct osmo_fd *fd, unsigned int what)
 
 		/* is checking in_addr.s_addr == INADDR_LOOPBACK making it more secure? */
 		for (i = 1; i < reset_trunk->number_endpoints; ++i)
-			mgcp_free_endp(&reset_trunk->endpoints[i]);
+			mgcp_release_endp(&reset_trunk->endpoints[i]);
 	}
 
 	return 0;
@@ -207,6 +211,12 @@ int main(int argc, char **argv)
 	if (!cfg)
 		return -1;
 
+#ifdef BUILD_MGCP_TRANSCODING
+	cfg->setup_rtp_processing_cb = &mgcp_transcoding_setup;
+	cfg->rtp_processing_cb = &mgcp_transcoding_process_rtp;
+	cfg->get_net_downlink_format_cb = &mgcp_transcoding_net_downlink_format;
+#endif
+
 	vty_info.copyright = openbsc_copyright;
 	vty_init(&vty_info);
 	logging_vty_add_cmds(&log_info);
@@ -218,7 +228,7 @@ int main(int argc, char **argv)
 	if (rc < 0)
 		return rc;
 
-	rc = telnet_init(tall_bsc_ctx, &dummy_network, 4243);
+	rc = telnet_init(tall_bsc_ctx, &dummy_network, OSMO_VTY_PORT_BSC_MGCP);
 	if (rc < 0)
 		return rc;
 

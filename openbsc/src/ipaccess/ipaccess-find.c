@@ -28,7 +28,8 @@
 
 #include <osmocom/core/select.h>
 #include <osmocom/core/timer.h>
-#include <openbsc/ipaccess.h>
+#include <osmocom/gsm/protocol/ipaccess.h>
+#include <osmocom/gsm/ipa.h>
 #include <openbsc/gsm_data.h>
 
 static int udp_sock(const char *ifname)
@@ -41,8 +42,13 @@ static int udp_sock(const char *ifname)
 		return fd;
 
 	if (ifname) {
+#ifdef __FreeBSD__
+		rc = setsockopt(fd, SOL_SOCKET, IP_RECVIF, ifname,
+				strlen(ifname));
+#else
 		rc = setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, ifname,
 				strlen(ifname));
+#endif
 		if (rc < 0)
 			goto err;
 	}
@@ -113,7 +119,7 @@ static int parse_response(unsigned char *buf, int len)
 		t_len = *cur++;
 		t_tag = *cur++;
 		
-		printf("%s='%s'  ", ipaccess_idtag_name(t_tag), cur);
+		printf("%s='%s'  ", ipa_ccm_idtag_name(t_tag), cur);
 
 		cur += t_len;
 	}

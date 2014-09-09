@@ -50,7 +50,9 @@
 #include <openbsc/ipaccess.h>
 #include <openbsc/mgcp.h>
 #include <openbsc/mgcp_internal.h>
-#include <openbsc/control_cmd.h>
+#include <openbsc/osmux.h>
+
+#include <osmocom/ctrl/control_cmd.h>
 
 #include <osmocom/sccp/sccp.h>
 
@@ -191,7 +193,7 @@ int bsc_mgcp_assign_patch(struct nat_sccp_connection *con, struct msgb *msg)
 		return -1;
 	}
 
-	cic = ntohs(*(uint16_t *)TLVP_VAL(&tp, GSM0808_IE_CIRCUIT_IDENTITY_CODE));
+	cic = ntohs(tlvp_val16_unal(&tp, GSM0808_IE_CIRCUIT_IDENTITY_CODE));
 	timeslot = cic & 0x1f;
 	multiplex = (cic & ~0x1f) >> 5;
 
@@ -251,7 +253,7 @@ void bsc_mgcp_free_endpoints(struct bsc_nat *nat)
 
 	for (i = 1; i < nat->mgcp_cfg->trunk.number_endpoints; ++i){
 		bsc_mgcp_free_endpoint(nat, i);
-		mgcp_free_endp(&nat->mgcp_cfg->trunk.endpoints[i]);
+		mgcp_release_endp(&nat->mgcp_cfg->trunk.endpoints[i]);
 	}
 }
 
@@ -267,8 +269,7 @@ static void bsc_mgcp_send_mdcx(struct bsc_connection *bsc, int port, struct mgcp
 		       "\r\n"
 		       "c=IN IP4 %s\r\n"
 		       "m=audio %d RTP/AVP 255\r\n",
-		       port,
-		       bsc->nat->mgcp_cfg->source_addr,
+		       port, bsc->nat->mgcp_cfg->source_addr,
 		       endp->bts_end.local_port);
 	if (len < 0) {
 		LOGP(DMGCP, LOGL_ERROR, "snprintf for MDCX failed.\n");
@@ -505,6 +506,7 @@ static int bsc_mgcp_policy_cb(struct mgcp_trunk_config *tcfg, int endpoint, int 
 	struct nat_sccp_connection *sccp;
 	struct mgcp_endpoint *mgcp_endp;
 	struct msgb *bsc_msg;
+	int osmux_cid = -1;
 
 	nat = tcfg->cfg->data;
 	bsc_endp = &nat->bsc_endpoints[endpoint];
@@ -541,11 +543,16 @@ static int bsc_mgcp_policy_cb(struct mgcp_trunk_config *tcfg, int endpoint, int 
 		}
 	}
 
+	/* Allocate a Osmux circuit ID */
+	if (state == MGCP_ENDP_CRCX &&
+	    nat->mgcp_cfg->osmux && sccp->bsc->cfg->osmux)
+		osmux_cid = osmux_get_cid();
+
 	/* we need to generate a new and patched message */
 	bsc_msg = bsc_mgcp_rewrite((char *) nat->mgcp_msg, nat->mgcp_length,
 				   sccp->bsc_endp, nat->mgcp_cfg->source_addr,
-				   mgcp_endp->bts_end.local_port,
-				   &mgcp_endp->net_end.payload_type);
+				   mgcp_endp->bts_end.local_port, osmux_cid,
+				   &mgcp_endp->net_end.codec.payload_type);
 	if (!bsc_msg) {
 		LOGP(DMGCP, LOGL_ERROR, "Failed to patch the msg.\n");
 		return MGCP_POLICY_CONT;
@@ -559,6 +566,16 @@ static int bsc_mgcp_policy_cb(struct mgcp_trunk_config *tcfg, int endpoint, int 
 	/* we need to update some bits */
 	if (state == MGCP_ENDP_CRCX) {
 		struct sockaddr_in sock;
+
+		/* Annotate the allocated Osmux CID until the bsc confirms that
+		 * it agrees to use Osmux for this voice flow.
+		 */
+		if (osmux_cid >= 0 &&
+		    mgcp_endp->osmux.state != OSMUX_STATE_ENABLED) {
+			mgcp_endp->osmux.state = OSMUX_STATE_ACTIVATING;
+			mgcp_endp->osmux.cid = osmux_cid;
+		}
+
 		socklen_t len = sizeof(sock);
 		if (getpeername(sccp->bsc->write_queue.bfd.fd, (struct sockaddr *) &sock, &len) != 0) {
 			LOGP(DMGCP, LOGL_ERROR, "Can not get the peername...%d/%s\n",
@@ -575,6 +592,11 @@ static int bsc_mgcp_policy_cb(struct mgcp_trunk_config *tcfg, int endpoint, int 
 		/* we will free the endpoint now and send a DLCX to the BSC */
 		msgb_free(bsc_msg);
 		bsc_mgcp_dlcx(sccp);
+
+		/* libmgcp clears the MGCP endpoint for us */
+		if (mgcp_endp->osmux.state == OSMUX_STATE_ENABLED)
+			osmux_put_cid(mgcp_endp->osmux.cid);
+
 		return MGCP_POLICY_CONT;
 	} else {
 		bsc_write(sccp->bsc, bsc_msg, IPAC_PROTO_MGCP_OLD);
@@ -610,7 +632,41 @@ static void free_chan_downstream(struct mgcp_endpoint *endp, struct bsc_endpoint
 	}
 
 	bsc_mgcp_free_endpoint(bsc->nat, ENDPOINT_NUMBER(endp));
-	mgcp_free_endp(endp);
+	mgcp_release_endp(endp);
+}
+
+static void bsc_mgcp_osmux_confirm(struct mgcp_endpoint *endp, const char *str)
+{
+	unsigned int osmux_cid;
+	char *res;
+
+	res = strstr(str, "X-Osmux: ");
+	if (!res) {
+		LOGP(DMGCP, LOGL_INFO,
+		     "BSC doesn't want to use Osmux, failing back to RTP\n");
+		goto err;
+	}
+
+	if (sscanf(res, "X-Osmux: %u", &osmux_cid) != 1) {
+		LOGP(DMGCP, LOGL_ERROR, "Failed to parse Osmux CID '%s'\n",
+		     str);
+		goto err;
+	}
+
+	if (endp->osmux.cid != osmux_cid) {
+		LOGP(DMGCP, LOGL_ERROR,
+		     "BSC sent us wrong CID %u, we expected %u",
+		     osmux_cid, endp->osmux.cid);
+		goto err;
+	}
+
+	LOGP(DMGCP, LOGL_NOTICE, "bsc accepted to use Osmux (cid=%u)\n",
+	     osmux_cid);
+	return;
+err:
+	osmux_put_cid(endp->osmux.cid);
+	endp->osmux.cid = -1;
+	endp->osmux.state = OSMUX_STATE_DISABLED;
 }
 
 /*
@@ -674,6 +730,9 @@ void bsc_mgcp_forward(struct bsc_connection *bsc, struct msgb *msg)
 		return;
 	}
 
+	if (endp->osmux.state == OSMUX_STATE_ACTIVATING)
+		bsc_mgcp_osmux_confirm(endp, (const char *) msg->l2h);
+
 	/* free some stuff */
 	talloc_free(bsc_endp->transaction_id);
 	bsc_endp->transaction_id = NULL;
@@ -686,9 +745,8 @@ void bsc_mgcp_forward(struct bsc_connection *bsc, struct msgb *msg)
 	 */
 	output = bsc_mgcp_rewrite((char * ) msg->l2h, msgb_l2len(msg), -1,
 				  bsc->nat->mgcp_cfg->source_addr,
-				  endp->net_end.local_port,
-				  &endp->bts_end.payload_type);
-
+				  endp->net_end.local_port, -1,
+				  &endp->bts_end.codec.payload_type);
 	if (!output) {
 		LOGP(DMGCP, LOGL_ERROR, "Failed to rewrite MGCP msg.\n");
 		return;
@@ -727,11 +785,12 @@ uint32_t bsc_mgcp_extract_ci(const char *str)
  * Create a new MGCPCommand based on the input and endpoint from a message
  */
 static void patch_mgcp(struct msgb *output, const char *op, const char *tok,
-		       int endp, int len, int cr)
+		       int endp, int len, int cr, int osmux_cid)
 {
 	int slen;
 	int ret;
 	char buf[40];
+	char osmux_extension[strlen("X-Osmux: 255")];
 
 	buf[0] = buf[39] = '\0';
 	ret = sscanf(tok, "%*s %s", buf);
@@ -741,14 +800,19 @@ static void patch_mgcp(struct msgb *output, const char *op, const char *tok,
 		return;
 	}
 
-	slen = sprintf((char *) output->l3h, "%s %s %x@mgw MGCP 1.0%s",
-			op, buf, endp, cr ? "\r\n" : "\n");
+	if (osmux_cid >= 0)
+		sprintf(osmux_extension, "\nX-Osmux: %u", osmux_cid);
+	else
+		osmux_extension[0] = '\0';
+
+	slen = sprintf((char *) output->l3h, "%s %s %x@mgw MGCP 1.0%s%s",
+			op, buf, endp, osmux_extension, cr ? "\r\n" : "\n");
 	output->l3h = msgb_put(output, slen);
 }
 
 /* we need to replace some strings... */
 struct msgb *bsc_mgcp_rewrite(char *input, int length, int endpoint,
-			      const char *ip, int port,
+			      const char *ip, int port, int osmux_cid,
 			      int *payload_type)
 {
 	static const char crcx_str[] = "CRCX ";
@@ -787,11 +851,11 @@ struct msgb *bsc_mgcp_rewrite(char *input, int length, int endpoint,
 		cr = len > 0 && token[len - 1] == '\r';
 
 		if (strncmp(crcx_str, token, (sizeof crcx_str) - 1) == 0) {
-			patch_mgcp(output, "CRCX", token, endpoint, len, cr);
+			patch_mgcp(output, "CRCX", token, endpoint, len, cr, osmux_cid);
 		} else if (strncmp(dlcx_str, token, (sizeof dlcx_str) - 1) == 0) {
-			patch_mgcp(output, "DLCX", token, endpoint, len, cr);
+			patch_mgcp(output, "DLCX", token, endpoint, len, cr, -1);
 		} else if (strncmp(mdcx_str, token, (sizeof mdcx_str) - 1) == 0) {
-			patch_mgcp(output, "MDCX", token, endpoint, len, cr);
+			patch_mgcp(output, "MDCX", token, endpoint, len, cr, -1);
 		} else if (strncmp(ip_str, token, (sizeof ip_str) - 1) == 0) {
 			output->l3h = msgb_put(output, strlen(ip_str));
 			memcpy(output->l3h, ip_str, strlen(ip_str));
@@ -1053,6 +1117,6 @@ void bsc_mgcp_clear_endpoints_for(struct bsc_connection *bsc)
 			rate_ctr_inc(ctr);
 
 		bsc_mgcp_free_endpoint(bsc->nat, i);
-		mgcp_free_endp(&bsc->nat->mgcp_cfg->trunk.endpoints[i]);
+		mgcp_release_endp(&bsc->nat->mgcp_cfg->trunk.endpoints[i]);
 	}
 }

@@ -27,9 +27,11 @@
 #include <openbsc/signal.h>
 #include <openbsc/vty.h>
 #include <openbsc/ipaccess.h>
+#include <openbsc/ctrl.h>
 
-#include <openbsc/control_cmd.h>
-#include <openbsc/control_if.h>
+#include <osmocom/ctrl/control_cmd.h>
+#include <osmocom/ctrl/control_if.h>
+#include <osmocom/ctrl/ports.h>
 
 #include <osmocom/core/application.h>
 #include <osmocom/core/linuxlist.h>
@@ -116,7 +118,7 @@ static void handle_options(int argc, char **argv)
 			daemonize = 1;
 			break;
 		case 'c':
-			config_file = strdup(optarg);
+			config_file = optarg;
 			break;
 		case 'T':
 			log_set_print_timestamp(osmo_stderr_target, 1);
@@ -212,7 +214,7 @@ int main(int argc, char **argv)
 	}
 	bsc_api_init(bsc_gsmnet, osmo_bsc_api());
 
-	bsc_gsmnet->ctrl = bsc_controlif_setup(bsc_gsmnet, 4249);
+	bsc_gsmnet->ctrl = bsc_controlif_setup(bsc_gsmnet, OSMO_CTRL_PORT_NITB_BSC);
 	if (!bsc_gsmnet) {
 		fprintf(stderr, "Failed to init the control interface. Exiting.\n");
 		exit(1);

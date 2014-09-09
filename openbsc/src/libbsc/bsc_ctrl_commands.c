@@ -18,8 +18,9 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#include <errno.h>
 
-#include <openbsc/control_cmd.h>
+#include <osmocom/ctrl/control_cmd.h>
 #include <openbsc/ipaccess.h>
 #include <openbsc/gsm_data.h>
 #include <openbsc/abis_nm.h>
@@ -30,7 +31,6 @@
 	CTRL_HELPER_SET_STRING(cmdname, dtype, element) \
 static struct ctrl_cmd_element cmd_##cmdname = { \
 	.name = cmdstr, \
-	.param = NULL, \
 	.get = get_##cmdname, \
 	.set = set_##cmdname, \
 	.verify = verify_vty_description_string, \

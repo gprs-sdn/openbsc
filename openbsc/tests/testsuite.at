@@ -10,7 +10,9 @@ AT_CLEANUP
 AT_SETUP([db])
 AT_KEYWORDS([db])
 cat $abs_srcdir/db/db_test.ok > expout
-AT_CHECK([$abs_top_builddir/tests/db/db_test], [], [expout], [ignore])
+cat $abs_srcdir/db/db_test.err > experr
+cat $abs_srcdir/db/hlr.sqlite3 > hlr.sqlite3
+AT_CHECK([$abs_top_builddir/tests/db/db_test], [], [expout], [experr])
 AT_CLEANUP
 
 AT_SETUP([channel])
@@ -23,6 +25,13 @@ AT_SETUP([mgcp])
 AT_KEYWORDS([mgcp])
 cat $abs_srcdir/mgcp/mgcp_test.ok > expout
 AT_CHECK([$abs_top_builddir/tests/mgcp/mgcp_test], [], [expout], [ignore])
+AT_CLEANUP
+
+AT_SETUP([mgcp-trans])
+AT_KEYWORDS([mgcp-trans])
+AT_CHECK([test "$enable_mgcp_transcoding_test" == yes || exit 77])
+cat $abs_srcdir/mgcp/mgcp_transcoding_test.ok > expout
+AT_CHECK([$abs_top_builddir/tests/mgcp/mgcp_transcoding_test], [], [expout], [ignore])
 AT_CLEANUP
 
 AT_SETUP([gprs])

@@ -49,6 +49,11 @@ Testing MDCX4_SO
 Detected packet duration: 40
 Requested packetetization period: 20-20
 Connection mode: 2: SEND
+Testing MDCX4_RO
+Dummy packets: 1
+Packet duration not set
+Requested packetetization period: 20-20
+Connection mode: 1: RECV
 Testing DLCX
 Detected packet duration: 20
 Requested packetization period not set
@@ -65,6 +70,20 @@ Testing SHORT3
 Testing SHORT4
 Testing RQNT1
 Testing RQNT2
+Testing DLCX
+Detected packet duration: 20
+Requested packetization period not set
+Connection mode: 0: NONE
+Testing CRCX
+Dummy packets: 1
+Detected packet duration: 40
+Requested packetetization period: 20-20
+Connection mode: 1: RECV
+Testing MDCX3
+Dummy packets: 1
+Packet duration not set
+Requested packetization period not set
+Connection mode not set
 Testing DLCX
 Detected packet duration: 20
 Requested packetization period not set
@@ -455,4 +474,5 @@ Stats: Jitter = 0, Transit = -144000
 In TS: 160320, dTS: 160, Seq: 1002
 Out TS change: 160, dTS: 160, Seq change: 1, TS Err change: in +0, out +0
 Stats: Jitter = 0, Transit = -144000
+Testing multiple payload types
 Done

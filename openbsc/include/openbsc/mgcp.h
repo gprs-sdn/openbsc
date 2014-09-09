@@ -65,6 +65,7 @@ static inline int rtp_calculate_port(int multiplex, int base)
 struct mgcp_endpoint;
 struct mgcp_config;
 struct mgcp_trunk_config;
+struct mgcp_rtp_end;
 
 #define MGCP_ENDP_CRCX 1
 #define MGCP_ENDP_DLCX 2
@@ -85,6 +86,24 @@ typedef int (*mgcp_change)(struct mgcp_trunk_config *cfg, int endpoint, int stat
 typedef int (*mgcp_policy)(struct mgcp_trunk_config *cfg, int endpoint, int state, const char *transactio_id);
 typedef int (*mgcp_reset)(struct mgcp_trunk_config *cfg);
 typedef int (*mgcp_rqnt)(struct mgcp_endpoint *endp, char tone);
+
+/**
+ * Return:
+ *   <  0 in case no audio was processed
+ *   >= 0 in case audio was processed. The remaining payload
+ *   length will be returned.
+ */
+typedef int (*mgcp_processing)(struct mgcp_endpoint *endp,
+			       struct mgcp_rtp_end *dst_end,
+			       char *data, int *len, int buf_size);
+typedef int (*mgcp_processing_setup)(struct mgcp_endpoint *endp,
+				     struct mgcp_rtp_end *dst_end,
+				     struct mgcp_rtp_end *src_end);
+
+typedef void (*mgcp_get_format)(struct mgcp_endpoint *endp,
+				int *payload_type,
+				const char**subtype_name,
+				const char**fmtp_extra);
 
 #define PORT_ALLOC_STATIC	0
 #define PORT_ALLOC_DYNAMIC	1
@@ -156,12 +175,20 @@ struct mgcp_config {
 	struct in_addr transcoder_in;
 	int transcoder_remote_base;
 
+	/* RTP processing */
+	mgcp_processing rtp_processing_cb;
+	mgcp_processing_setup setup_rtp_processing_cb;
+
+	mgcp_get_format get_net_downlink_format_cb;
+
 	struct osmo_wqueue gw_fd;
 
 	struct mgcp_port_range bts_ports;
 	struct mgcp_port_range net_ports;
 	struct mgcp_port_range transcoder_ports;
 	int endp_dscp;
+
+	int bts_force_ptime;
 
 	mgcp_change change_cb;
 	mgcp_policy policy_cb;
@@ -181,6 +208,19 @@ struct mgcp_config {
 	int last_bts_port;
 
 	enum mgcp_role role;
+
+	/* osmux translator: 0 means disabled, 1 means enabled */
+	int osmux;
+	/* The BSC-NAT may ask for enabling osmux on demand. This tells us if
+	 * the osmux socket is already initialized.
+	 */
+	int osmux_init;
+	/* osmux batch factor: from 1 to 4 maximum */
+	int osmux_batch;
+	/* osmux batch size (in bytes) */
+	int osmux_batch_size;
+	/* osmux port */
+	uint16_t osmux_port;
 };
 
 /* config management */
@@ -189,7 +229,8 @@ int mgcp_parse_config(const char *config_file, struct mgcp_config *cfg,
 		      enum mgcp_role role);
 int mgcp_vty_init(void);
 int mgcp_endpoints_allocate(struct mgcp_trunk_config *cfg);
-void mgcp_free_endp(struct mgcp_endpoint *endp);
+void mgcp_release_endp(struct mgcp_endpoint *endp);
+void mgcp_initialize_endp(struct mgcp_endpoint *endp);
 int mgcp_reset_transcoder(struct mgcp_config *cfg);
 void mgcp_format_stats(struct mgcp_endpoint *endp, char *stats, size_t size);
 int mgcp_parse_stats(struct msgb *msg, uint32_t *ps, uint32_t *os, uint32_t *pr, uint32_t *_or, int *loss, uint32_t *jitter);
@@ -221,5 +262,9 @@ static inline void mgcp_endpoint_to_timeslot(int endpoint, int *multiplex, int *
 int mgcp_send_reset_ep(struct mgcp_endpoint *endp, int endpoint);
 int mgcp_send_reset_all(struct mgcp_config *cfg);
 
+
+int mgcp_create_bind(const char *source_addr, struct osmo_fd *fd, int port);
+int mgcp_send(struct mgcp_endpoint *endp, int dest, int is_rtp, struct sockaddr_in *addr, char *buf, int rc);
+int mgcp_udp_send(int fd, struct in_addr *addr, int port, char *buf, int len);
 
 #endif

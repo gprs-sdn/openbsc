@@ -1575,6 +1575,17 @@ static int tch_map(struct gsm_lchan *lchan, struct gsm_lchan *remote_lchan)
 	case GSM_BTS_TYPE_NANOBTS:
 	case GSM_BTS_TYPE_OSMO_SYSMO:
 		if (!ipacc_rtp_direct) {
+			if (!lchan->abis_ip.rtp_socket) {
+				LOGP(DHO, LOGL_ERROR, "no RTP socket for "
+					"lchan\n");
+				return -EIO;
+			}
+			if (!remote_lchan->abis_ip.rtp_socket) {
+				LOGP(DHO, LOGL_ERROR, "no RTP socket for "
+					"remote_lchan\n");
+				return -EIO;
+			}
+
 			/* connect the TCH's to our RTP proxy */
 			rc = rsl_ipacc_mdcx_to_rtpsock(lchan);
 			if (rc < 0)
@@ -2001,6 +2012,10 @@ static int gsm48_cc_rx_call_conf(struct gsm_trans *trans, struct msgb *msg)
 		gsm48_decode_cccap(&call_conf.cccap,
 			     TLVP_VAL(&tp, GSM48_IE_CC_CAP)-1);
 	}
+
+	/* IMSI of called subscriber */
+	strncpy(call_conf.imsi, trans->subscr->imsi,
+		sizeof(call_conf.imsi)-1);
 
 	new_cc_state(trans, GSM_CSTATE_MO_TERM_CALL_CONF);
 
@@ -2867,7 +2882,8 @@ static int _gsm48_lchan_modify(struct gsm_trans *trans, void *arg)
 {
 	struct gsm_mncc *mode = arg;
 
-	return gsm0808_assign_req(trans->conn, mode->lchan_mode, 1);
+	return gsm0808_assign_req(trans->conn, mode->lchan_mode,
+		trans->conn->lchan->type != GSM_LCHAN_TCH_H);
 }
 
 static struct downstate {
@@ -2953,6 +2969,7 @@ int mncc_tx_to_cc(struct gsm_network *net, int msg_type, void *arg)
 	case GSM_TCHF_FRAME:
 	case GSM_TCHF_FRAME_EFR:
 	case GSM_TCHH_FRAME:
+	case GSM_TCH_FRAME_AMR:
 		/* Find callref */
 		trans = trans_find_by_callref(net, data->callref);
 		if (!trans) {
