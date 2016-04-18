@@ -30,6 +30,16 @@ int vgsn_rest_create_context_req(
 		struct pdp_t *pdp, 
 		struct sgsn_pdp_ctx *pctx);
 
+int vgsn_rest_attach_req(
+                struct vgsn_rest_ctx *rest,
+                struct sgsn_mm_ctx *ctx,
+                uint8_t mi_type,
+		struct msgb *msg
+);
+
+//XXX
+int vgsn_rest_detach_req();
+
 extern struct llist_head vgsn_rest_ctxts;
 
 #endif

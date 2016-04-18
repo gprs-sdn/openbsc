@@ -4,6 +4,9 @@
 #include <osmocom/core/msgb.h>
 #include <openbsc/gprs_sgsn.h>
 
+int gsm48_gmm_authorize(struct sgsn_mm_ctx *ctx, enum gprs_t3350_mode t3350_mode);
+int gsm48_tx_gmm_att_rej_oldmsg(const struct msgb *old_msg, uint8_t gmm_cause);
+int gsm48_tx_gmm_att_rej(struct sgsn_mm_ctx *mm, uint8_t gmm_cause);
 int gsm48_tx_gsm_deact_pdp_req(struct sgsn_pdp_ctx *pdp, uint8_t sm_cause);
 int gsm48_tx_gsm_act_pdp_rej(struct sgsn_mm_ctx *mm, uint8_t tid,
 			     uint8_t cause, uint8_t pco_len, uint8_t *pco_v);

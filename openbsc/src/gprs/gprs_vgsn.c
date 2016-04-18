@@ -132,7 +132,7 @@ int vgsn_rest_delete_context_req(
 	mm = pctx->mm;
 
 	// inform controller of our intent
-	snprintf(req, sizeof(req)-1, "%sgprs/pdp/remove&imsi=%s&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u",
+	snprintf(req, sizeof(req)-1, "%sgprs/pdp/cmd=del&imsi=%s&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u",
 			rest->remote_url,
 			mm->imsi,
 			pctx->sapi,
@@ -228,6 +228,7 @@ void vgsn_rest_create_context_cb(struct curl_buf *buf, void *ctx)
 	sndcp_sm_activate_ind(&pctx->mm->llme->lle[pctx->sapi], pctx->nsapi);
 
 	// send modified GTP message to MS
+	LOGP(DGPRS, LOGL_NOTICE, "SENDING ACTIVATE PDP CTX ACCEPT FROM REST CB IN vgsn.c\n");
 	gsm48_tx_gsm_act_pdp_acc(pctx);
 	return;
 
@@ -265,7 +266,7 @@ int vgsn_rest_create_context_req(
 	mm = pctx->mm;
 
 	// create our REST request
-	snprintf(req, sizeof(req)-1, "%sgprs/pdp/add&imsi=%s&bvci=%u&tlli=%08x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s&drx_param=%04x", 
+	snprintf(req, sizeof(req)-1, "%sgprs/pdp/cmd=add&imsi=%s&bvci=%u&tlli=%08x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s&drx_param=%04x", 
 			rest->remote_url,
 			mm->imsi,
 			mm->bvci,
@@ -274,14 +275,121 @@ int vgsn_rest_create_context_req(
 			pctx->nsapi,
 			mm->ra.mcc, mm->ra.mnc, mm->ra.lac, mm->ra.rac,
 			pdp->apn_use.v+1,	//XXX: dirty, make some validation / apn_use.l
-			mm->drx_parms			//XXX: FIXME: mm->drx_params is invalid?? 
+			mm->drx_parms		//XXX: FIXME: mm->drx_params is invalid?? 
 			);
 
 	// execute this request
 	// vgsn_rest_create_context_cb will handle the results
-	if (curl_get(rest->curl, req, &vgsn_rest_create_context_cb, pctx)) 
+	if (curl_get(rest->curl, req, &vgsn_rest_create_context_cb, (void *) pctx, 0, 0)) 
 		return -1;
 
 	return 0;
 }
 
+/**
+ * Callback indicating finished vgsn_rest_attach_req execution
+ */
+void vgsn_rest_attach_cb(struct curl_buf *buf, void *ctx, void *msg, void *cause)
+{
+	const nx_json *json, *json_imsi;
+	struct msgb *message = (struct msgb *) msg;
+	struct sgsn_mm_ctx *mmctx = (struct sgsn_mm_ctx*)ctx;
+
+	if (!mmctx) {
+		LOGP(DGPRS, LOGL_ERROR, "vgsn_rest_attach_cb: missing MM context\n");
+		return;
+	}
+
+         if (!buf) {
+		LOGP(DGPRS, LOGL_ERROR, "vgsn_rest_attach_cb: invalid buffer\n");
+		goto reject;
+	}
+
+	// parse buffer content
+	// response should contain valid JSON with one object containint at least
+	// IMSI
+	json = nx_json_parse(buf->data, 0);
+	if (!json) {
+		LOGP(DGPRS, LOGL_ERROR, "REST call failed: invalid response\n");
+		goto reject;
+	}
+
+	json_imsi = nx_json_get(json, "imsi");
+
+	if (json_imsi->type != NX_JSON_STRING) {
+		LOGP(DGPRS, LOGL_ERROR, "REST call failed: no IMSI received\n");
+		goto reject;
+	}
+	
+	LOGP(DGPRS, LOGL_ERROR, "REST response: imsi=%s\n", json_imsi->text_value);
+	return gsm48_gmm_authorize(mmctx, GMM_T3350_MODE_ATT);;
+
+reject:
+	
+	LOGP(DGPRS, LOGL_ERROR, "REST ATTACH REQUEST denied\n");
+	gsm48_tx_gmm_att_rej_oldmsg(message,GMM_CAUSE_GPRS_NOTALLOWED);
+	LOGP(DGPRS, LOGL_ERROR, "gsm48_tx_gmm_att_rej_oldmsg executed\n");
+}
+
+/**
+* Attach request
+*/
+int vgsn_rest_attach_req(
+		struct vgsn_rest_ctx *rest,
+		struct sgsn_mm_ctx *ctx,
+		uint8_t mi_type, 
+		struct msgb *msg
+)
+{	
+	char req[REST_REMOTE_URL_LENGTH+400];
+
+	if (!ctx) {
+                LOGP(DGPRS, LOGL_ERROR, "MM context invalid!");
+                return -1;
+	}	
+
+	LOGP(DGPRS, LOGL_NOTICE, "Sending attach request via REST interface (%s)\n", rest->remote_url);
+	
+	switch (mi_type) {
+
+	case GSM_MI_TYPE_IMSI:
+		
+		snprintf(req, sizeof(req)-1, "%sgprs/gmm/cmd=att&imsi=%s",
+			rest->remote_url,
+			ctx->imsi	//XXX:maybe add P-TMSI & old RAI
+			);
+		break;
+
+	case GSM_MI_TYPE_TMSI:
+		snprintf(req, sizeof(req)-1, "%sgprs/gmm/cmd=att&tmsi=%08x",
+			rest->remote_url,
+			ctx->p_tmsi       //XXX:maybe add P-TMSI & old RAI ??????                         
+			);
+        	break;	
+	
+	default:
+		return -1;
+	}
+	
+	//execute the request
+	//XXX add mm ctx and llme here
+	if (curl_get(rest->curl, req, &vgsn_rest_attach_cb, (void *) ctx, (void *) msg, 0))
+                return -1;
+	return 0;
+}
+
+/**
+ * Callback indicating finished vgsn_rest_detach_req execution
+ */
+void vgsn_rest_detach_cb()
+{
+
+}
+
+/**
+* Detach request
+*/
+int vgsn_rest_detach_req()
+{
+	return 0;
+}

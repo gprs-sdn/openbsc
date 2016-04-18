@@ -103,7 +103,7 @@ struct sgsn_mm_ctx {
 	uint32_t		tlli;
 	uint32_t		tlli_new;
 	uint16_t		nsei;
-	uint16_t		bvci;
+	int16_t		bvci;
 	struct rate_ctr_group	*ctrg;
 	struct osmo_timer_list	timer;
 	unsigned int		T;		/* Txxxx number */

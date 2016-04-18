@@ -112,7 +112,7 @@ static int curl_conn_event(struct osmo_fd *fd, unsigned int what)
 
 		// either way, we need to execute callback function for this request
 		if (req->cb) 
-			(*req->cb)(conn->buf, req->ctx);
+			(*req->cb)(conn->buf, req->arg1, req->arg2, req->arg3);
 	
 		// destroy old request and remove easy-handle from multi-handle
 		// (bug in libcurl multi interface)
@@ -242,14 +242,14 @@ void curl_conn_destroy(struct curl_conn *conn)
  * 
  * @returns 0 on success
  */
-int curl_get(struct curl_conn *conn, char *url, curl_recv_cb *cb, void *ctx)
+int curl_get(struct curl_conn *conn, char *url, curl_recv_cb *cb, void *arg1, void *arg2, void *arg3)
 {
 	struct curl_req *req;
 
 	LOGP(DGPRS, LOGL_NOTICE, "curl_get: %s\n", url);
 
 	// create new request 
-	req = curl_req_create(url, cb, ctx, 0, 0);
+	req = curl_req_create(url, cb, arg1, arg2, arg3, 0, 0);
 	if (!req) {
 		LOGP(DGPRS, LOGL_ERROR, "failed to create new request\n");
 		return -1;
@@ -347,7 +347,7 @@ struct curl_req * curl_conn_pop_req(struct curl_conn *conn)
 	return llist_entry(lh, struct curl_req, entry);
 }
 
-struct curl_req *curl_req_create(char *url, curl_recv_cb *cb, void *ctx, char *post_data, uint32_t post_data_len)
+struct curl_req *curl_req_create(char *url, curl_recv_cb *cb, void *arg1, void *arg2, void *arg3, char *post_data, uint32_t post_data_len)
 {
 	struct curl_req *req;
 
@@ -358,7 +358,9 @@ struct curl_req *curl_req_create(char *url, curl_recv_cb *cb, void *ctx, char *p
 	INIT_LLIST_HEAD(&req->entry);
 	req->url = strdup(url);
 	req->cb = cb;
-	req->ctx = ctx;
+	req->arg1 = arg1;
+	req->arg2 = arg2;
+	req->arg3 = arg3;
 	//XXX: maybe we should duplicate this request instead...
 	req->post_data = post_data;
 	req->post_data_len = post_data_len;

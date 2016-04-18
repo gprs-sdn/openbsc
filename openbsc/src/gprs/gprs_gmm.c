@@ -406,14 +406,17 @@ static int _tx_gmm_att_rej(struct msgb *msg, uint8_t gmm_cause)
 
 	return gsm48_gmm_sendmsg(msg, 0, NULL);
 }
-static int gsm48_tx_gmm_att_rej_oldmsg(const struct msgb *old_msg,
+//XXX: remove static
+//static 
+int gsm48_tx_gmm_att_rej_oldmsg(const struct msgb *old_msg,
 					uint8_t gmm_cause)
 {
 	struct msgb *msg = gsm48_msgb_alloc();
 	gmm_copy_id(msg, old_msg);
 	return _tx_gmm_att_rej(msg, gmm_cause);
 }
-static int gsm48_tx_gmm_att_rej(struct sgsn_mm_ctx *mm,
+//static 
+int gsm48_tx_gmm_att_rej(struct sgsn_mm_ctx *mm,
 				uint8_t gmm_cause)
 {
 	struct msgb *msg = gsm48_msgb_alloc();
@@ -546,8 +549,8 @@ static int gsm48_rx_gmm_auth_ciph_resp(struct sgsn_mm_ctx *ctx,
 }
 
 /* Check if we can already authorize a subscriber */
-static int gsm48_gmm_authorize(struct sgsn_mm_ctx *ctx,
-				enum gprs_t3350_mode t3350_mode)
+//static 
+int gsm48_gmm_authorize(struct sgsn_mm_ctx *ctx, enum gprs_t3350_mode t3350_mode)
 {
 	if (strlen(ctx->imei) && strlen(ctx->imsi)) {
 #ifdef PTMSI_ALLOC
@@ -566,6 +569,10 @@ static int gsm48_gmm_authorize(struct sgsn_mm_ctx *ctx,
 	}
 
 	if (!strlen(ctx->imsi)) {
+
+		//XXX: if IMSI is unknown
+		//if we use REST we have to ask the controller again, this time with IMSI
+
 		ctx->mm_state = GMM_COMMON_PROC_INIT;
 		ctx->t3370_id_type = GSM_MI_TYPE_IMSI;
 		mmctx_timer_start(ctx, 3370, GSM0408_T3370_SECS);
@@ -599,6 +606,7 @@ static int gsm48_rx_gmm_id_resp(struct sgsn_mm_ctx *ctx, struct msgb *msg)
 		/* we already have a mm context with current TLLI, but no
 		 * P-TMSI / IMSI yet.  What we now need to do is to fill
 		 * this initial context with data from the HLR */
+		//XXX: see above
 		if (strlen(ctx->imsi) == 0) {
 			/* Check if we already have a MM context for this IMSI */
 			struct sgsn_mm_ctx *ictx;
@@ -641,7 +649,8 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 	char mi_string[GSM48_MI_SIZE];
 	struct gprs_ra_id ra_id;
 	uint16_t cid;
-
+	struct vgsn_rest_ctx *rest;
+	
 	DEBUGP(DMM, "-> GMM ATTACH REQUEST ");
 
 	/* As per TS 04.08 Chapter 4.7.1.4, the attach request arrives either
@@ -657,7 +666,7 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 		goto err_inval;
 	cur += msnc_len;
 
-	/* aTTACH Type 10.5.5.2 */
+	/* Attach Type 10.5.5.2 */
 	att_type = *cur++ & 0x0f;
 
 	/* DRX parameter 10.5.5.6 */
@@ -679,6 +688,8 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 
 	/* Old routing area identification 10.5.5.15. Skip it */
 	cur += 6;
+	//XXX: necessary to contact the old SGSN or determine if we generated the P-TMSI
+	//XXX: also might be necessary coctanct old controller?	
 
 	/* MS Radio Access Capability 10.5.5.12a */
 	ms_ra_acc_cap_len = *cur++;
@@ -688,6 +699,9 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 	cur += ms_ra_acc_cap_len;
 
 	/* Optional: Old P-TMSI Signature, Requested READY timer, TMSI Status */
+
+	//get rest ctx to handle the requests to the controller
+	rest = vgsn_rest_ctx_by_id(0);
 
 	switch (mi_type) {
 	case GSM_MI_TYPE_IMSI:
@@ -700,15 +714,17 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 #else
 			/* As a temorary hack, we simply assume that the IMSI exists,
 			 * as long as it is part of 'our' network */
-			char mccmnc[16];
-			snprintf(mccmnc, sizeof(mccmnc), "%03d%02d", ra_id.mcc, ra_id.mnc);
-			if (strncmp(mccmnc, mi_string, 5) &&
-			    (sgsn->cfg.acl_enabled &&
-			     !sgsn_acl_lookup(mi_string))) {
-				LOGP(DMM, LOGL_INFO, "Rejecting ATTACH REQUESET IMSI=%s\n",
-				     mi_string);
-				return gsm48_tx_gmm_att_rej_oldmsg(msg,
-								GMM_CAUSE_GPRS_NOTALLOWED);
+			//XXX: no. we will ask controller instead
+			if(!rest){
+				char mccmnc[16];
+				snprintf(mccmnc, sizeof(mccmnc), "%03d%02d", ra_id.mcc, ra_id.mnc);
+				if (strncmp(mccmnc, mi_string, 5) &&
+			    	(sgsn->cfg.acl_enabled &&
+			     	!sgsn_acl_lookup(mi_string))) {
+					LOGP(DMM, LOGL_INFO, "Rejecting ATTACH REQUEST with IMSI=%s\n",
+				     	mi_string);
+					return gsm48_tx_gmm_att_rej_oldmsg(msg,GMM_CAUSE_GPRS_NOTALLOWED);
+				}
 			}
 			ctx = sgsn_mm_ctx_alloc(0, &ra_id);
 			if (!ctx)
@@ -716,9 +732,17 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 			strncpy(ctx->imsi, mi_string, sizeof(ctx->imsi));
 #endif
 		}
+	
+		//ask controller if we know the IMSI
+
 		ctx->tlli = msgb_tlli(msg);
 		ctx->llme = llme;
 		msgid2mmctx(ctx, msg);
+		
+		if (rest){
+			vgsn_rest_attach_req(rest, ctx, GSM_MI_TYPE_IMSI, msg);
+			LOGP(DMM, LOGL_ERROR, "REST attach returned to GMM\n");
+		}
 		break;
 	case GSM_MI_TYPE_TMSI:
 		memcpy(&tmsi, mi+1, 4);
@@ -732,9 +756,19 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 			ctx = sgsn_mm_ctx_alloc(msgb_tlli(msg), &ra_id);
 			ctx->p_tmsi = tmsi;
 		}
+		
+		//XXX: ask controller if we know the P-TMSI + old RAI to get IMSI
+		//if no, do not reject him but request IMSI insteadi
+		//XXX old rai necessary
+
 		ctx->tlli = msgb_tlli(msg);
 		ctx->llme = llme;
 		msgid2mmctx(ctx, msg);
+		
+		if (rest){
+			vgsn_rest_attach_req(rest, ctx, GSM_MI_TYPE_TMSI, msg);
+		}
+		
 		break;
 	default:
 		LOGP(DMM, LOGL_NOTICE, "Rejecting ATTACH REQUEST with "
@@ -754,6 +788,7 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 
 #ifdef PTMSI_ALLOC
 	/* Allocate a new P-TMSI (+ P-TMSI signature) and update TLLI */
+	//XXX:controller should be updated or generate this
 	ctx->p_tmsi_old = ctx->p_tmsi;
 	ctx->p_tmsi = sgsn_alloc_ptmsi();
 #endif
@@ -766,7 +801,12 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 			  GPRS_ALGO_GEA0, NULL);
 
 	DEBUGPC(DMM, "\n");
-	return gsm48_gmm_authorize(ctx, GMM_T3350_MODE_ATT);
+	if (!rest){
+		return gsm48_gmm_authorize(ctx, GMM_T3350_MODE_ATT);
+	}
+	
+	LOGP(DMM, LOGL_ERROR, "Attach finishing in gmm.c\n");
+	return 0;
 
 err_inval:
 	DEBUGPC(DMM, "\n");
@@ -1422,6 +1462,7 @@ static int gsm48_rx_gsm_act_pdp_req(struct sgsn_mm_ctx *mmctx,
 	}
 
 	pdp = sgsn_create_pdp_ctx(rest, ggsn, mmctx, act_req->req_nsapi, act_req->req_llc_sapi, &tp);
+	LOGP(DGPRS, LOGL_ERROR, "PDP CTX CREATED IN gmm.c\n");
 	if (!pdp)
 		return -1;
 

@@ -34,22 +34,24 @@ void curl_conn_destroy(struct curl_conn *conn);
 /**
  * requests
  */
-typedef void (curl_recv_cb)(struct curl_buf*, void*);
+typedef void (curl_recv_cb)(struct curl_buf*, void*, void*, void*);
 struct curl_req {
 	struct llist_head entry;
 	char *url;
 	curl_recv_cb *cb;
-	void *ctx;
+	void *arg1;
+	void *arg2;
+	void *arg3;
 	char *post_data;
 	uint32_t post_data_len;
 };
-struct curl_req *curl_req_create(char *url, curl_recv_cb *cb, void *ctx, char *post_data, uint32_t post_data_len);
+struct curl_req *curl_req_create(char *url, curl_recv_cb *cb, void *arg1, void *arg2, void *arg3, char *post_data, uint32_t post_data_len);
 void curl_req_destroy(struct curl_req *req);
 
 /**
  * file transfers
  */
-int curl_get(struct curl_conn *conn, char *url, curl_recv_cb *cb, void *ctx);
+int curl_get(struct curl_conn *conn, char *url, curl_recv_cb *cb, void *arg1, void *arg2, void *arg3);
 #if 0
 int curl_post(struct curl_conn *conn, char *url, char *data, uint32_t len, curl_recv_cb *cb, void *ctx);
 #endif
