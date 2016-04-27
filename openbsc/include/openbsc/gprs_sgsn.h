@@ -69,6 +69,7 @@ struct sgsn_mm_ctx {
 	/* Opt: Software Version Numbber / TS 23.195 */
 	char 			msisdn[GSM_EXTENSION_LENGTH];
 	struct gprs_ra_id	ra;
+        struct gprs_ra_id       ra_old;
 	uint16_t		cell_id;
 	uint32_t		cell_id_age;
 	uint16_t		sac;	/* Iu: Service Area Code */

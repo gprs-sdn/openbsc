@@ -570,9 +570,6 @@ int gsm48_gmm_authorize(struct sgsn_mm_ctx *ctx, enum gprs_t3350_mode t3350_mode
 
 	if (!strlen(ctx->imsi)) {
 
-		//XXX: if IMSI is unknown
-		//if we use REST we have to ask the controller again, this time with IMSI
-
 		ctx->mm_state = GMM_COMMON_PROC_INIT;
 		ctx->t3370_id_type = GSM_MI_TYPE_IMSI;
 		mmctx_timer_start(ctx, 3370, GSM0408_T3370_SECS);
@@ -588,6 +585,7 @@ static int gsm48_rx_gmm_id_resp(struct sgsn_mm_ctx *ctx, struct msgb *msg)
 	struct gsm48_hdr *gh = (struct gsm48_hdr *) msgb_gmmh(msg);
 	uint8_t mi_type = gh->data[1] & GSM_MI_TYPE_MASK;
 	char mi_string[GSM48_MI_SIZE];
+	struct vgsn_rest_ctx *rest;
 
 	gsm48_mi_to_string(mi_string, sizeof(mi_string), &gh->data[1], gh->data[0]);
 	DEBUGP(DMM, "-> GMM IDENTITY RESPONSE: mi_type=0x%02x MI(%s) ",
@@ -600,13 +598,14 @@ static int gsm48_rx_gmm_id_resp(struct sgsn_mm_ctx *ctx, struct msgb *msg)
 
 	if (mi_type == ctx->t3370_id_type)
 		mmctx_timer_stop(ctx, 3370);
+	
+	rest = vgsn_rest_ctx_by_id(0);	
 
 	switch (mi_type) {
 	case GSM_MI_TYPE_IMSI:
 		/* we already have a mm context with current TLLI, but no
 		 * P-TMSI / IMSI yet.  What we now need to do is to fill
 		 * this initial context with data from the HLR */
-		//XXX: see above
 		if (strlen(ctx->imsi) == 0) {
 			/* Check if we already have a MM context for this IMSI */
 			struct sgsn_mm_ctx *ictx;
@@ -623,7 +622,15 @@ static int gsm48_rx_gmm_id_resp(struct sgsn_mm_ctx *ctx, struct msgb *msg)
 				sgsn_mm_ctx_free(ictx);
 			}
 		}
+	
 		strncpy(ctx->imsi, mi_string, sizeof(ctx->imsi));
+		
+		//if rest exists(we use SDN) and we receive IMSI then P-TMSI was sent during initial attach and we requested IMSI
+		//we have to verify IMSI and send another message to the controller
+		if (rest){
+		   	vgsn_rest_attach_req(rest, ctx, GSM_MI_TYPE_IMSI, msg);
+			return 0;
+		}
 		break;
 	case GSM_MI_TYPE_IMEI:
 		strncpy(ctx->imei, mi_string, sizeof(ctx->imei));
@@ -647,7 +654,7 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 	uint16_t drx_par;
 	uint32_t tmsi;
 	char mi_string[GSM48_MI_SIZE];
-	struct gprs_ra_id ra_id;
+	struct gprs_ra_id ra_id, ra_id_old;
 	uint16_t cid;
 	struct vgsn_rest_ctx *rest;
 	
@@ -687,9 +694,10 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 		get_value_string(gprs_att_t_strs, att_type));
 
 	/* Old routing area identification 10.5.5.15. Skip it */
+	//store it to the ctx, useful during attach
+	gsm48_parse_ra(&ra_id_old, cur);
+	LOGP(DMM, LOGL_ERROR, "ATTACH REQUEST. Old RAI=%u-%u-%u-%u\n", ra_id_old.mcc, ra_id_old.mnc, ra_id_old.lac,ra_id_old.rac);
 	cur += 6;
-	//XXX: necessary to contact the old SGSN or determine if we generated the P-TMSI
-	//XXX: also might be necessary coctanct old controller?	
 
 	/* MS Radio Access Capability 10.5.5.12a */
 	ms_ra_acc_cap_len = *cur++;
@@ -733,12 +741,15 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 #endif
 		}
 	
-		//ask controller if we know the IMSI
-
 		ctx->tlli = msgb_tlli(msg);
 		ctx->llme = llme;
 		msgid2mmctx(ctx, msg);
-		
+		ctx->ra_old.mcc = ra_id_old.mcc;
+		ctx->ra_old.mnc = ra_id_old.mnc;
+		ctx->ra_old.lac = ra_id_old.lac;
+		ctx->ra_old.rac = ra_id_old.rac;	
+	
+		//ask controller if we know the IMSI
 		if (rest){
 			vgsn_rest_attach_req(rest, ctx, GSM_MI_TYPE_IMSI, msg);
 			LOGP(DMM, LOGL_ERROR, "REST attach returned to GMM\n");
@@ -757,14 +768,18 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 			ctx->p_tmsi = tmsi;
 		}
 		
-		//XXX: ask controller if we know the P-TMSI + old RAI to get IMSI
-		//if no, do not reject him but request IMSI insteadi
-		//XXX old rai necessary
-
 		ctx->tlli = msgb_tlli(msg);
 		ctx->llme = llme;
 		msgid2mmctx(ctx, msg);
+		ctx->ra_old.mcc = ra_id_old.mcc;
+		ctx->ra_old.mnc = ra_id_old.mnc;
+		ctx->ra_old.lac = ra_id_old.lac;
+		ctx->ra_old.rac = ra_id_old.rac;	
 		
+		//try to attach using P-TMSI + old RAI
+		//if not successful, do not reject him but request IMSI instead
+		//if we use REST we have to ask the controller again
+		//this time with IMSI, call has to be made from the cb method
 		if (rest){
 			vgsn_rest_attach_req(rest, ctx, GSM_MI_TYPE_TMSI, msg);
 		}
@@ -786,26 +801,26 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 	ctx->ms_network_capa.len = msnc_len;
 	memcpy(ctx->ms_network_capa.buf, msnc, msnc_len);
 
-#ifdef PTMSI_ALLOC
-	/* Allocate a new P-TMSI (+ P-TMSI signature) and update TLLI */
-	//XXX:controller should be updated or generate this
-	ctx->p_tmsi_old = ctx->p_tmsi;
-	ctx->p_tmsi = sgsn_alloc_ptmsi();
-#endif
-	/* Even if there is no P-TMSI allocated, the MS will switch from
-	 * foreign TLLI to local TLLI */
-	ctx->tlli_new = gprs_tmsi2tlli(ctx->p_tmsi, TLLI_LOCAL);
+	if (!rest){
 
-	/* Inform LLC layer about new TLLI but keep old active */
-	gprs_llgmm_assign(ctx->llme, ctx->tlli, ctx->tlli_new,
+#ifdef PTMSI_ALLOC
+	    /* Allocate a new P-TMSI (+ P-TMSI signature) and update TLLI */
+	    ctx->p_tmsi_old = ctx->p_tmsi;
+	    ctx->p_tmsi = sgsn_alloc_ptmsi();
+#endif
+	    /* Even if there is no P-TMSI allocated, the MS will switch from
+	     * foreign TLLI to local TLLI */
+	    ctx->tlli_new = gprs_tmsi2tlli(ctx->p_tmsi, TLLI_LOCAL);
+
+	    /* Inform LLC layer about new TLLI but keep old active */
+	    gprs_llgmm_assign(ctx->llme, ctx->tlli, ctx->tlli_new,
 			  GPRS_ALGO_GEA0, NULL);
 
-	DEBUGPC(DMM, "\n");
-	if (!rest){
-		return gsm48_gmm_authorize(ctx, GMM_T3350_MODE_ATT);
+	    DEBUGPC(DMM, "\n");
+	
+	    return gsm48_gmm_authorize(ctx, GMM_T3350_MODE_ATT);
 	}
 	
-	LOGP(DMM, LOGL_ERROR, "Attach finishing in gmm.c\n");
 	return 0;
 
 err_inval:
@@ -820,12 +835,12 @@ static int gsm48_rx_gmm_det_req(struct sgsn_mm_ctx *ctx, struct msgb *msg)
 	struct sgsn_pdp_ctx *pdp, *pdp2;
 	uint8_t detach_type, power_off;
 	int rc;
+	struct vgsn_rest_ctx *rest;
 
 	detach_type = gh->data[0] & 0x7;
 	power_off = gh->data[0] & 0x8;
 
-	/* FIXME: In 24.008 there is an optional P-TMSI and P-TMSI signature IE */
-
+	/* FIXME: In 24.008 there is an optional P-TMSI and 
 	DEBUGP(DMM, "-> GMM DETACH REQUEST TLLI=0x%08x type=%s %s\n",
 		msgb_tlli(msg), get_value_string(gprs_det_t_mo_strs, detach_type),
 		power_off ? "Power-off" : "");
@@ -840,6 +855,11 @@ static int gsm48_rx_gmm_det_req(struct sgsn_mm_ctx *ctx, struct msgb *msg)
 		sgsn_delete_pdp_ctx(pdp);
 		/* FIXME: the callback wants to transmit a DEACT PDP CTX ACK,
 		 * which is quite stupid for a MS that has just detached.. */
+	}
+	
+	rest = vgsn_rest_ctx_by_id(0);
+	if (rest){
+		vgsn_rest_detach_req(rest, ctx);	
 	}
 
 	/* force_stby = 0 */

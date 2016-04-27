@@ -132,7 +132,7 @@ int vgsn_rest_delete_context_req(
 	mm = pctx->mm;
 
 	// inform controller of our intent
-	snprintf(req, sizeof(req)-1, "%sgprs/pdp/cmd=del&imsi=%s&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u",
+	snprintf(req, sizeof(req)-1, "%sgprs/sm/cmd=del&imsi=%s&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u",
 			rest->remote_url,
 			mm->imsi,
 			pctx->sapi,
@@ -266,7 +266,8 @@ int vgsn_rest_create_context_req(
 	mm = pctx->mm;
 
 	// create our REST request
-	snprintf(req, sizeof(req)-1, "%sgprs/pdp/cmd=add&imsi=%s&bvci=%u&tlli=%08x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s&drx_param=%04x", 
+	//XXX change PDP to SM
+	snprintf(req, sizeof(req)-1, "%sgprs/sm/cmd=add&imsi=%s&bvci=%u&tlli=%08x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s&drx_param=%04x", 
 			rest->remote_url,
 			mm->imsi,
 			mm->bvci,
@@ -289,9 +290,9 @@ int vgsn_rest_create_context_req(
 /**
  * Callback indicating finished vgsn_rest_attach_req execution
  */
-void vgsn_rest_attach_cb(struct curl_buf *buf, void *ctx, void *msg, void *cause)
+void vgsn_rest_attach_cb(struct curl_buf *buf, void *ctx, void *msg, void *att_type)
 {
-	const nx_json *json, *json_imsi;
+	const nx_json *json, *json_imsi, *json_ptmsi, *json_attach_type, *json_attach_result;
 	struct msgb *message = (struct msgb *) msg;
 	struct sgsn_mm_ctx *mmctx = (struct sgsn_mm_ctx*)ctx;
 
@@ -307,27 +308,92 @@ void vgsn_rest_attach_cb(struct curl_buf *buf, void *ctx, void *msg, void *cause
 
 	// parse buffer content
 	// response should contain valid JSON with one object containint at least
-	// IMSI
+	// P-TMSI, IMSI should be present for verification, too
 	json = nx_json_parse(buf->data, 0);
 	if (!json) {
 		LOGP(DGPRS, LOGL_ERROR, "REST call failed: invalid response\n");
 		goto reject;
 	}
 
-	json_imsi = nx_json_get(json, "imsi");
+	json_attach_type = nx_json_get(json, "cmd");
+	json_attach_result = nx_json_get(json, "result");
+	
+	if (json_attach_type->type != NX_JSON_STRING) {
+		LOGP(DGPRS, LOGL_ERROR, "REST call failed: no attach type received\n");
+		goto reject;
+	}
+
+	if (json_attach_result->type != NX_JSON_STRING) {
+		LOGP(DGPRS, LOGL_ERROR, "REST call failed: no attach type received\n");
+		goto reject;
+	}
+	
+	//attach with IMSI
+	if (! strcmp(json_attach_type->text_value, "atti")){
+		
+		if (! strcmp(json_attach_result->text_value, "success")){
+			json_imsi = nx_json_get(json, "imsi");
+			json_ptmsi = nx_json_get(json, "p-tmsi");
+		}	
+		//send attach reject if IMSI attach fails
+		else {	
+			goto reject;
+		}
+	}
+	
+	//attach with P-TMSI
+	else if (! strcmp(json_attach_type->text_value, "attp")){
+		if (! strcmp(json_attach_result->text_value, "success")){
+			json_imsi = nx_json_get(json, "imsi");
+			json_ptmsi = nx_json_get(json, "p-tmsi");
+		}
+		//try attach with IMSI if attach with P-TMSI fails
+		else {
+			LOGP(DGPRS, LOGL_ERROR, "Attach with P-TMSI unsuccessful. Falling back to IMSI\n");
+			goto fallback;
+		}
+	}
+	
+	//unknown attach type
+	else {
+		goto reject;
+	}
 
 	if (json_imsi->type != NX_JSON_STRING) {
 		LOGP(DGPRS, LOGL_ERROR, "REST call failed: no IMSI received\n");
 		goto reject;
 	}
 	
-	LOGP(DGPRS, LOGL_ERROR, "REST response: imsi=%s\n", json_imsi->text_value);
-	return gsm48_gmm_authorize(mmctx, GMM_T3350_MODE_ATT);;
+	if (json_ptmsi->type != NX_JSON_STRING) {
+                LOGP(DGPRS, LOGL_ERROR, "REST call failed: no P-TMSI received\n");
+                goto reject;
+        }
+
+	//insert values retrieved from controller to the MM ctx
+	strncpy(mmctx->imsi, json_imsi->text_value, sizeof(mmctx->imsi));
+	mmctx->p_tmsi_old = mmctx->p_tmsi;
+	mmctx->p_tmsi = strtol(json_ptmsi->text_value, 0, 0);
+	
+	LOGP(DGPRS, LOGL_ERROR, "REST response: imsi=%s p-tmsi=%x\n", mmctx->imsi, mmctx->p_tmsi);
+	LOGP(DGPRS, LOGL_ERROR, "REST response: length of p-tmsi: %d\n", strlen(json_ptmsi->text_value));
+	
+	/* Even if there is no P-TMSI allocated, the MS will switch from
+	* foreign TLLI to local TLLI */
+	mmctx->tlli_new = gprs_tmsi2tlli(mmctx->p_tmsi, TLLI_LOCAL);
+
+	/* Inform LLC layer about new TLLI but keep old active */
+	gprs_llgmm_assign(mmctx->llme, mmctx->tlli, mmctx->tlli_new, GPRS_ALGO_GEA0, NULL);
+
+fallback:
+	//get other subscriber info (IMSI/IMEI)
+	gsm48_gmm_authorize(mmctx, GMM_T3350_MODE_ATT);
+	return;
 
 reject:
-	
+	//XXX free the MM ctx	
 	LOGP(DGPRS, LOGL_ERROR, "REST ATTACH REQUEST denied\n");
-	gsm48_tx_gmm_att_rej_oldmsg(message,GMM_CAUSE_GPRS_NOTALLOWED);
+	//gsm48_tx_gmm_att_rej_oldmsg(message,GMM_CAUSE_GPRS_NOTALLOWED);
+	gsm48_tx_gmm_att_rej(mmctx, GMM_CAUSE_MS_ID_NOT_DERIVED);
 	LOGP(DGPRS, LOGL_ERROR, "gsm48_tx_gmm_att_rej_oldmsg executed\n");
 }
 
@@ -354,16 +420,17 @@ int vgsn_rest_attach_req(
 
 	case GSM_MI_TYPE_IMSI:
 		
-		snprintf(req, sizeof(req)-1, "%sgprs/gmm/cmd=att&imsi=%s",
+		snprintf(req, sizeof(req)-1, "%sgprs/gmm/cmd=atti&imsi=%s",
 			rest->remote_url,
-			ctx->imsi	//XXX:maybe add P-TMSI & old RAI
+			ctx->imsi
 			);
 		break;
 
 	case GSM_MI_TYPE_TMSI:
-		snprintf(req, sizeof(req)-1, "%sgprs/gmm/cmd=att&tmsi=%08x",
+		snprintf(req, sizeof(req)-1, "%sgprs/gmm/cmd=attp&p-tmsi=0x%08x&rai=%u-%u-%u-%u",
 			rest->remote_url,
-			ctx->p_tmsi       //XXX:maybe add P-TMSI & old RAI ??????                         
+			ctx->p_tmsi,
+			ctx->ra_old.mcc, ctx->ra_old.mnc, ctx->ra_old.lac, ctx->ra_old.rac       
 			);
         	break;	
 	
@@ -372,7 +439,6 @@ int vgsn_rest_attach_req(
 	}
 	
 	//execute the request
-	//XXX add mm ctx and llme here
 	if (curl_get(rest->curl, req, &vgsn_rest_attach_cb, (void *) ctx, (void *) msg, 0))
                 return -1;
 	return 0;
@@ -382,14 +448,31 @@ int vgsn_rest_attach_req(
  * Callback indicating finished vgsn_rest_detach_req execution
  */
 void vgsn_rest_detach_cb()
-{
-
+{	
+	return;
 }
 
 /**
 * Detach request
 */
-int vgsn_rest_detach_req()
-{
+int vgsn_rest_detach_req(struct vgsn_rest_ctx *rest,
+	                 struct sgsn_mm_ctx *ctx)
+{	
+	char req[REST_REMOTE_URL_LENGTH+400];
+	
+	if (!ctx){
+		LOGP(DGPRS, LOGL_ERROR, "MM context invalid!");
+		return -1;
+	}	
+
+	LOGP(DGPRS, LOGL_NOTICE, "Sending attach request via REST interface (%s)\n", rest->remote_url);
+
+	snprintf(req, sizeof(req)-1, "%sgprs/gmm/cmd=deti&p_tmsi=0x%08x",
+                            rest->remote_url,
+                            ctx->p_tmsi);
+
+	//execute the request
+	if (curl_get(rest->curl, req, &vgsn_rest_detach_cb, 0, 0, 0))
+                return -1;
 	return 0;
 }

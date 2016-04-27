@@ -37,8 +37,10 @@ int vgsn_rest_attach_req(
 		struct msgb *msg
 );
 
-//XXX
-int vgsn_rest_detach_req();
+int vgsn_rest_detach_req(
+		struct vgsn_rest_ctx *rest,
+                struct sgsn_mm_ctx *ctx
+);
 
 extern struct llist_head vgsn_rest_ctxts;
 
