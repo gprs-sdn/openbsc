@@ -406,8 +406,7 @@ static int _tx_gmm_att_rej(struct msgb *msg, uint8_t gmm_cause)
 
 	return gsm48_gmm_sendmsg(msg, 0, NULL);
 }
-//XXX: remove static
-//static 
+
 int gsm48_tx_gmm_att_rej_oldmsg(const struct msgb *old_msg,
 					uint8_t gmm_cause)
 {
@@ -415,7 +414,7 @@ int gsm48_tx_gmm_att_rej_oldmsg(const struct msgb *old_msg,
 	gmm_copy_id(msg, old_msg);
 	return _tx_gmm_att_rej(msg, gmm_cause);
 }
-//static 
+
 int gsm48_tx_gmm_att_rej(struct sgsn_mm_ctx *mm,
 				uint8_t gmm_cause)
 {
@@ -722,7 +721,7 @@ static int gsm48_rx_gmm_att_req(struct sgsn_mm_ctx *ctx, struct msgb *msg,
 #else
 			/* As a temorary hack, we simply assume that the IMSI exists,
 			 * as long as it is part of 'our' network */
-			//XXX: no. we will ask controller instead
+			// if rest exists, we will ask controller instead
 			if(!rest){
 				char mccmnc[16];
 				snprintf(mccmnc, sizeof(mccmnc), "%03d%02d", ra_id.mcc, ra_id.mnc);

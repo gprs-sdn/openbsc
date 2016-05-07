@@ -266,7 +266,6 @@ int vgsn_rest_create_context_req(
 	mm = pctx->mm;
 
 	// create our REST request
-	//XXX change PDP to SM
 	snprintf(req, sizeof(req)-1, "%sgprs/sm/cmd=add&imsi=%s&bvci=%u&tlli=%08x&sapi=%u&nsapi=%u&rai=%u-%u-%u-%u&apn=%s&drx_param=%04x", 
 			rest->remote_url,
 			mm->imsi,
@@ -390,7 +389,8 @@ fallback:
 	return;
 
 reject:
-	//XXX free the MM ctx	
+	//XXX free the MM ctx
+	sgsn_mm_ctx_free(mmctx);	
 	LOGP(DGPRS, LOGL_ERROR, "REST ATTACH REQUEST denied\n");
 	//gsm48_tx_gmm_att_rej_oldmsg(message,GMM_CAUSE_GPRS_NOTALLOWED);
 	gsm48_tx_gmm_att_rej(mmctx, GMM_CAUSE_MS_ID_NOT_DERIVED);
