@@ -467,7 +467,7 @@ int vgsn_rest_detach_req(struct vgsn_rest_ctx *rest,
 
 	LOGP(DGPRS, LOGL_NOTICE, "Sending attach request via REST interface (%s)\n", rest->remote_url);
 
-	snprintf(req, sizeof(req)-1, "%sgprs/gmm/cmd=deti&p_tmsi=0x%08x",
+	snprintf(req, sizeof(req)-1, "%sgprs/gmm/cmd=det&p-tmsi=0x%08x",
                             rest->remote_url,
                             ctx->p_tmsi);
 
